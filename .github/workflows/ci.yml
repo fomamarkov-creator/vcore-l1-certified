@@ -15,6 +15,7 @@ jobs:
       - uses: leanprover/lean-action@v1
         with:
           build: false
+          lake-manifest: false
 
       - name: Build Linked Lean 4 Certifier
         run: |
@@ -34,3 +35,4 @@ jobs:
           pip install numpy torch --index-url https://pytorch.org
           pip install -e . --no-deps
           python test_quantizer.py
+          
