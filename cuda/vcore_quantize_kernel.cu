@@ -2,10 +2,9 @@
  * Copyright (C) 2026 Efim Sergeevich Markov (ef.87@mail.ru)
  * Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
  *
- * V-CORE Hybrid CUDA Kernels:
- * 1. vcore_optimize: Resonance filter with Markov static suppression.
- * 2. vcore_fused_ternary_gemv: Single-token matrix-vector inference over 2-bit packed uint8.
- * 3. vcore_fused_ternary_gemm: Batched / Prefill matrix-matrix inference (Y = X * W_packed^T).
+ * V-CORE High-Throughput CUDA Kernels v2:
+ * - 32-bit vectorized uint32 reads (16 ternary weights per memory transaction)
+ * - Shared-memory (__shared__) input caching for GEMV/GEMM inference
  */
 
 #include <cuda_runtime.h>
@@ -14,6 +13,7 @@
 
 #define EPS 1e-6f
 #define DEFAULT_ZETA 1.024f
+#define MAX_SHARED_IN 8192
 
 extern "C" __global__
 void vcore_optimize(const float* __restrict__ X,
@@ -35,7 +35,7 @@ void vcore_optimize(const float* __restrict__ X,
     }
 }
 
-// GEMV: один токен (вектор X длины in_features)
+// Ускоренное GEMV-ядро: кэширует вектор X в __shared__ памяти и читает по 16 весов (uint32)
 extern "C" __global__
 void vcore_fused_ternary_gemv(const uint8_t* __restrict__ W_packed,
                               const float* __restrict__ block_scales,
@@ -44,6 +44,15 @@ void vcore_fused_ternary_gemv(const uint8_t* __restrict__ W_packed,
                               int out_features,
                               int in_features,
                               int group_size) {
+    __shared__ float s_x[MAX_SHARED_IN];
+    if (in_features <= MAX_SHARED_IN) {
+        for (int idx = threadIdx.x; idx < in_features; idx += blockDim.x) {
+            s_x[idx] = X[idx];
+        }
+        __syncthreads();
+    }
+    const float* x_ptr = (in_features <= MAX_SHARED_IN) ? s_x : X;
+
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= out_features) return;
 
@@ -59,24 +68,37 @@ void vcore_fused_ternary_gemv(const uint8_t* __restrict__ W_packed,
         int byte_start = base_byte_offset + (col_start / 4);
         int num_bytes = group_size / 4;
 
-        for (int j = 0; j < num_bytes; ++j) {
+        // Быстрый 32-битный проход (по 4 байта = 16 тернарных весов за одну загрузку)
+        int num_words = num_bytes / 4;
+        const uint32_t* word_ptr = reinterpret_cast<const uint32_t*>(W_packed + byte_start);
+        for (int w = 0; w < num_words; ++w) {
+            uint32_t packed32 = word_ptr[w];
+            int c = col_start + w * 16;
+            #pragma unroll
+            for (int k = 0; k < 16; ++k) {
+                int code = (packed32 >> (k * 2)) & 0x03;
+                float s = (float)(code - 1);
+                block_acc += s * x_ptr[c + k];
+            }
+        }
+
+        // Остаток, если group_size не кратен 16 (например, group_size = 16 кратен, но на всякий случай)
+        for (int j = num_words * 4; j < num_bytes; ++j) {
             uint8_t packed = W_packed[byte_start + j];
             int c = col_start + j * 4;
-
-            float s0 = (float)((int)(packed & 0x03) - 1);
-            float s1 = (float)((int)((packed >> 2) & 0x03) - 1);
-            float s2 = (float)((int)((packed >> 4) & 0x03) - 1);
-            float s3 = (float)((int)((packed >> 6) & 0x03) - 1);
-
-            block_acc += s0 * X[c] + s1 * X[c + 1] + s2 * X[c + 2] + s3 * X[c + 3];
+            block_acc += ((float)((int)(packed & 0x03) - 1)) * x_ptr[c]
+                       + ((float)((int)((packed >> 2) & 0x03) - 1)) * x_ptr[c + 1]
+                       + ((float)((int)((packed >> 4) & 0x03) - 1)) * x_ptr[c + 2]
+                       + ((float)((int)((packed >> 6) & 0x03) - 1)) * x_ptr[c + 3];
         }
+
         total_acc += block_acc * block_scales[base_scale_offset + b];
     }
 
     Y[row] = total_acc;
 }
 
-// GEMM: пакетный проход для длинных промптов X[batch_tokens, in_features] -> Y[batch_tokens, out_features]
+// Пакетное GEMM-ядро для длинных промптов (prefill)
 extern "C" __global__
 void vcore_fused_ternary_gemm(const uint8_t* __restrict__ W_packed,
                               const float* __restrict__ block_scales,
@@ -86,8 +108,8 @@ void vcore_fused_ternary_gemm(const uint8_t* __restrict__ W_packed,
                               int out_features,
                               int in_features,
                               int group_size) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x;   // out_features
-    int token = blockIdx.y * blockDim.y + threadIdx.y; // batch_tokens
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    int token = blockIdx.y * blockDim.y + threadIdx.y;
     if (row >= out_features || token >= batch_tokens) return;
 
     const float* x_row = X + token * in_features;
