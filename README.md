@@ -1,10 +1,10 @@
-[![V-CORE L1-Certified CI & CUDA Build](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
-**Lean Core:** `l1-projection-complexity-lean4` (`v2.0.0`) | **Toolchain:** Lean `v4.37.0-rc1` | **Backend:** PyTorch / CUDA (`CuPy` + `DLPack`) | **License:** AGPL-3.0
+**Lean Core:** `l1-projection-complexity-lean4` (`v2.0.0`) | **Toolchain:** Lean `v4.37.0-rc1` | **Backend:** PyTorch / CUDA (`sm_70`–`sm_90`) | **License:** AGPL-3.0
 
 # V-CORE \(\ell_1\)-Certified: Hybrid Lean 4 + GPU 1.58-Bit Neural Network Quantizer
 
-A hybrid symbolic-numeric quantization engine combining a **machine-checked Lean 4 formal verification core** (`l1-projection-complexity-lean4`, release `v2.0.0`) with a high-speed **GPU/CUDA execution backend** (`LinearSelector` + blockwise \(\Delta = 1\) median scaling) and a **layerwise `.safetensors` 2-bit packer** for 1.58-bit (`{-1, 0, +1}`) neural network compression without retraining.
+A complete symbolic-numeric compression and inference engine combining a **machine-checked Lean 4 formal verification core** (`l1-projection-complexity-lean4`, release `v2.0.0`) with **blockwise adaptive \(\theta_b^*\) noise pruning**, **\(\Delta = 1\) optimal \(\ell_1\) median scaling**, **sharded `.safetensors` 2-bit repacking with Auto-Rollback**, and **Fused CUDA kernels** (`vcore_fused_ternary_gemv`).
 
 * **Author:** E. S. Markov (ORCID: `0009-0005-2235-5464`)
 * **Affiliation:** Independent Researcher, Astrakhan, Russia
@@ -12,82 +12,44 @@ A hybrid symbolic-numeric quantization engine combining a **machine-checked Lean
 
 ---
 
-## Repository Architecture
+## Key Capabilities
 
-1. **Formal Certification Engine (`CertifierMain.lean` \(\to\) `vcore_certifier`):**
-   * Directly imports `MarkovL1Complexity`, `MarkovL1Solver`, `MarkovL1WeightedSolver`, and `MarkovL1Quantizer` (`v2.0.0`) via Lake.
-   * Executes exact-rational (\(\mathbb{Q}\)) \(\ell_1\)-optimality proofs without `Classical.choice`, certifying that blockwise median scales \(\alpha_b^* = \mathrm{median}(\vert{}w_i\vert{}_{i \in S_b})\) achieve the global minimum \(\ell_1\) quantization error in the decoupled regime (\(\Delta = 1\)).
-2. **GPU / PyTorch Quantizer (`vcore_l1/cuda_quantizer.py`):**
-   * **Stage 1 (`LinearSelector` CUDA Kernel):** Hard-threshold noise pruning (\(\vert{}w_i\vert{} \le \theta \to 0\)).
-   * **Stage 2 (\(\Delta = 1\) Blockwise Median Scaling):** Computes optimal per-block \(\ell_1\) median scales for ternary masks \(\{-1, 0, +1\}\), reducing quantization error by **33.3%–80.2%** compared to global `Mean-Abs` scaling.
-3. **Layerwise `.safetensors` Repacker (`vcore_l1/safetensors_quantizer.py`):**
-   * Iterates over full model checkpoints, preserves sensitive layers (`layernorm`, `bias`, `embed`, `lm_head`), and packs linear weight matrices into 2-bit `uint8` tensors (4 ternary weights per byte) + `float16` block scales (`~6–7x` disk compression).
-4. **Native CUDA Library (`cuda/VCoreEngine.cpp`, `cuda/vcore_quantize_kernel.cu`, `CMakeLists.txt`):**
-   * Compiles into `libvcore_engine.so` for direct low-level GPU execution.
+1. **Formal Lean 4 Verification (`CertifierMain.lean` \(\to\) `vcore_certifier`):**
+   * Directly links to `MarkovL1Complexity`, `MarkovL1Solver`, `MarkovL1WeightedSolver`, and `MarkovL1Quantizer` (`v2.0.0`) to verify global \(\ell_1\)-optimality over exact rationals \(\mathbb{Q}\) without `Classical.choice`.
+2. **Per-Block Adaptive Thresholding (\(\theta_b^*\)) & \(\Delta = 1\) Median Scaling (`vcore_l1/cuda_quantizer.py`):**
+   * Automatically selects the optimal pruning threshold \(\theta_b^* \in \{\theta, 0.25 m_b, 0.50 m_b\}\) per block to minimize \(\ell_1\) quantization error (`{-1, 0, +1}`).
+3. **Sharded Hugging Face Model Packer with Auto-Rollback (`vcore_l1/safetensors_quantizer.py` & `vcore-pack`):**
+   * Compresses both single `.safetensors` checkpoints and multi-shard models (`model.safetensors.index.json`) into 2-bit `uint8` tensors (4 ternary weights per byte), automatically rolling back sensitive layers (`LayerNorm`, `bias`) to `FP16` if relative \(\ell_1\) error exceeds `max_rel_error`.
+4. **Fused 2-Bit CUDA Kernel (`cuda/vcore_quantize_kernel.cu` \(\to\) `libvcore_engine.so`):**
+   * Executes matrix-vector inference (`vcore_fused_ternary_gemv`) directly on 2-bit packed `uint8` weights in GPU registers without unpacking to `float32` in VRAM (compiled for NVIDIA architectures `sm_70` through `sm_90`).
 
 ---
 
-## Installation & Quick Start
+## Quick Start & CLI Usage
 
-### 1. Automatic Setup (Linux / Google Colab)
+### 1. Install & Build
 ```bash
 git clone https://github.com
 cd vcore-l1-certified
 bash setup.sh
 ```
 
-### 2. Run the Formal Lean 4 Certifier
+### 2. One-Line Model Compression via CLI (`vcore-pack`)
+Compress a single `.safetensors` file or an entire sharded Hugging Face model directory:
 ```bash
-lake update
-lake exe cache get
-lake build
-lake exe vcore_certifier --verify-bench
+vcore-pack --input ./path_to_hf_model --output ./model_vcore_158bit --group-size 32 --max-rel-error 0.40
 ```
 
----
-
-## Usage Guide (Python / PyTorch)
-
-### A. Quantize a Single Layer Tensor (`{-1, 0, +1}`)
+### 3. Python API & Formal Lean 4 Check
 ```python
 import torch
 from vcore_l1 import VCoreTernaryQuantizer, verify_with_lean4_engine
 
-# Verify formal mathematical guarantees via Lean 4
+# Verify formal Lean 4 theorems
 print(verify_with_lean4_engine())
 
-# Quantize a 2D weight matrix into 1.58-bit ternary values
+# Quantize tensor with per-block adaptive theta_b* and Delta=1 median
 weights = torch.randn(128, 256)
-quantizer = VCoreTernaryQuantizer(group_size=32, theta=1e-4)
+quantizer = VCoreTernaryQuantizer(group_size=32, auto_theta=True)
 w_quant, ternary_mask, scales = quantizer.quantize(weights)
-```
-
-### B. Adaptive Layerwise Compression of a Full `.safetensors` Model (with Auto-Rollback)
-```python
-from vcore_l1 import repack_safetensors_layerwise
-
-stats = repack_safetensors_layerwise(
-    input_path="model.safetensors",
-    output_path="model_vcore_158bit.safetensors",
-    group_size=32,
-    theta=1e-4,
-    max_rel_error=0.45,
-    include_aux_layers=True,
-)
-print(stats)
-```
-
-
-### C. Unpack Weights for Inference
-```python
-from safetensors.torch import load_file
-from vcore_l1 import unpack_uint8_to_ternary
-
-data = load_file("model_vcore_158bit.safetensors")
-mask = unpack_uint8_to_ternary(
-    data["model.layers.0.self_attn.q_proj.weight.vcore_packed"],
-    tuple(data["model.layers.0.self_attn.q_proj.weight.vcore_shape"].tolist()),
-)
-scales = data["model.layers.0.self_attn.q_proj.weight.vcore_scales"].to(mask.dtype)
-w_restored = (mask.reshape(-1, 32) * scales.unsqueeze(1)).reshape(mask.shape)
 ```
