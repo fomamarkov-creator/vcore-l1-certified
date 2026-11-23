@@ -84,6 +84,11 @@ def main():
     k_cat, v_cat = cache.update(k2, v2, layer_idx=0)
     assert k_cat.shape == (1, 4, 9, 64) and cache.get_seq_length() == 9
 
+from vcore_l1 import solve_chain_overlap_fpt
+    w_chain = torch.tensor([4.0, 0.0, 4.0, 0.0])
+    c_opt, fpt_cost = solve_chain_overlap_fpt(w_chain, num_grid=9)
+    assert c_opt.shape == (4,) and fpt_cost == 0.0
+
     subprocess.run(["vcore-bench", "--hidden-size", "256", "--out-size", "256", "--steps", "10"], check=True)
     print("[OK] Все компоненты (Lean 4 v3.0.0, Activation-Weighted L1, Warp CUDA, Cascade, KV-Cache) работают!")
 
