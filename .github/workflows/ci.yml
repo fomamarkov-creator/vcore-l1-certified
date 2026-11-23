@@ -14,7 +14,9 @@ jobs:
 
       - name: Install Elan & Lean 4
         run: |
-          curl https://githubusercontent.com -sSf | sh -s -- -y --default-toolchain leanprover/lean4:v4.37.0-rc1
+          curl -sSfL https://github.com | tar xz
+          ./elan-init -y --default-toolchain leanprover/lean4:v4.37.0-rc1
+          rm -f elan-init
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
       - name: Build Linked Lean 4 Certifier
@@ -32,7 +34,7 @@ jobs:
       - name: Install PyTorch CPU & Run Quantizer Benchmark
         run: |
           pip install --upgrade pip
-          pip install numpy torch --index-url https://pytorch.org
+          pip install numpy safetensors torch --index-url https://pytorch.org
           pip install -e . --no-deps
           python test_quantizer.py
           
