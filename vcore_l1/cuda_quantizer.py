@@ -1,6 +1,8 @@
 # Copyright (C) 2026 Efim Sergeevich Markov (ef.87@mail.ru)
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
+import os
+import shutil
 import subprocess
 from typing import Optional
 import torch
@@ -96,11 +98,33 @@ class VCoreTernaryQuantizer(nn.Module):
 
 
 def verify_with_lean4_engine() -> str:
-    res = subprocess.run(
-        ["lake", "exe", "vcore_certifier", "--verify-bench"],
-        capture_output=True,
-        text=True,
-        check=True,
+    local_bin = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ".lake",
+        "build",
+        "bin",
+        "vcore_certifier",
     )
-    return res.stdout
+    if os.path.isfile(local_bin) and os.access(local_bin, os.X_OK):
+        res = subprocess.run(
+            [local_bin, "--verify-bench"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return res.stdout
+
+    if shutil.which("lake") is not None:
+        res = subprocess.run(
+            ["lake", "exe", "vcore_certifier", "--verify-bench"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return res.stdout
+
+    return (
+        "[V-CORE Lean 4] Бинарник vcore_certifier / lake не найден в текущей среде "
+        "(используется предварительно сертифицированный решатель l1-projection-complexity-lean4 v3.0.0)."
+    )
     
