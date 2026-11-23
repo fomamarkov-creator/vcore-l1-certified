@@ -79,13 +79,16 @@ class VCoreKVCacheQuantizer:
 
 class VCoreDynamicCache:
     """
-    Совместимый с Hugging Face transformers (past_key_values) кэш генерации,
+    Совместимый с Hugging Face transformers (v4 и v5+) кэш генерации,
     сжимающий историю ключей и значений на лету по Δ=1 медиане.
     """
+    is_compileable = False
+
     def __init__(self, group_size: int = 32):
         self.kv_q = VCoreKVCacheQuantizer(group_size=group_size)
         self.key_cache: List[Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], torch.dtype]] = []
         self.value_cache: List[Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], torch.dtype]] = []
+        self.layers: List[Any] = []
         self._seen_tokens = 0
 
     def update(
@@ -114,6 +117,18 @@ class VCoreDynamicCache:
 
     def get_seq_length(self, layer_idx: int = 0) -> int:
         return self._seen_tokens
+
+    def get_query_offset(self, layer_idx: int = 0) -> int:
+        return self.get_seq_length(layer_idx)
+
+    def get_max_cache_shape(self) -> Optional[int]:
+        return None
+
+    def get_mask_sizes(self, cache_position: torch.Tensor, layer_idx: int) -> Tuple[int, int]:
+        query_length = cache_position.shape
+        kv_length = self.get_seq_length(layer_idx) + query_length
+        return kv_length, 0
+
 class VCoreLinear(nn.Module):
     """
     Drop-in замена для nn.Linear (2-bit / 4-bit + Δ=1 перестановка каналов с выбросами).
@@ -210,20 +225,22 @@ class VCoreLinear(nn.Module):
                 out = out + self.bias.to(x.dtype)
             return out.reshape(*orig_shape[:-1], self.out_features)
 
+        num_elems = self.out_features * self.in_features
+        padded_elems = ((num_elems + self.group_size - 1) // self.group_size) * self.group_size
         if self.bits == 2:
-            grid = unpack_uint8_to_ternary(self.vcore_packed, (self.out_features, self.in_features)).to(x.device)
+            grid = unpack_uint8_to_ternary(self.vcore_packed, (padded_elems,)).to(x.device)
         else:
-            grid = unpack_uint8_to_int4(self.vcore_packed, (self.out_features, self.in_features)).to(x.device)
+            grid = unpack_uint8_to_int4(self.vcore_packed, (padded_elems,)).to(x.device)
 
         scales = self.vcore_scales.to(torch.float32)
-        w_restored = (grid.reshape(-1, self.group_size) * scales.unsqueeze(1)).reshape(
+        w_restored = (grid.reshape(-1, self.group_size) * scales.unsqueeze(1)).reshape(-1)[:num_elems].reshape(
             self.out_features, self.in_features
-        ).to(x.dtype)
-        bias = self.bias.to(x.dtype) if self.bias is not None else None
-        return F.linear(x_2d, w_restored, bias).reshape(*orig_shape[:-1], self.out_features)
+        )
+        bias_f32 = self.bias.to(torch.float32) if self.bias is not None else None
+        out = F.linear(x_2d.to(torch.float32), w_restored, bias_f32).to(x.dtype)
+        return out.reshape(*orig_shape[:-1], self.out_features)
 
-
-def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -> nn.Module:
+    def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -> nn.Module:
     for full_name, module in list(model.named_modules()):
         if isinstance(module, nn.Linear):
             w_key = f"{full_name}.weight"
@@ -254,16 +271,16 @@ def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -
 
     non_packed = {k: v for k, v in state_dict.items() if ".vcore_" not in k}
     model.load_state_dict(non_packed, strict=False)
+    if hasattr(model, "tie_weights"):
+        model.tie_weights()
     return model
 
 
-def load_vcore_causal_lm(model_dir: str, device: str = "cpu", dtype: torch.dtype = torch.float16):
+    def load_vcore_causal_lm(model_dir: str, device: str = "cpu", dtype: torch.dtype = torch.float16):
     from transformers import AutoConfig, AutoModelForCausalLM
 
     config = AutoConfig.from_pretrained(model_dir)
-    with torch.device("meta"):
-        model = AutoModelForCausalLM.from_config(config, torch_dtype=dtype)
-    model = model.to_empty(device="cpu")
+    model = AutoModelForCausalLM.from_config(config, dtype=dtype)
 
     shard_files = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
     if not shard_files:
