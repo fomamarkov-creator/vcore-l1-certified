@@ -2,7 +2,6 @@
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
 import subprocess
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -14,54 +13,18 @@ except ImportError:
     HAS_CUPY = False
 
 
-SELECTOR_CUDA_CODE = r'''
-extern "C" __global__
-void vcore_selector_kernel(const float* __restrict__ X,
-                           float* __restrict__ Y,
-                           int rows,
-                           int cols,
-                           float theta) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= rows || col >= cols) return;
-
-    int idx = row * cols + col;
-    float val = X[idx];
-    Y[idx] = (fabsf(val) > theta) ? val : 0.0f;
-}
-'''
-
-
 class VCoreTernaryQuantizer(nn.Module):
     """
-    Гибридный 1.58-bit квантователь {-1, 0, +1}:
-    1. Пороговое отсечение шума (LinearSelector CUDA kernel, |w| <= theta -> 0).
-    2. Поблочное Δ = 1 медианное масштабирование (alpha_b* = median(|w_i|))
-       по верифицированной модели MarkovL1Quantizer.lean.
+    Улучшенный гибридный 1.58-bit квантователь {-1, 0, +1}:
+    1. Автоматический подбор оптимального порога шума theta_b* для КАЖДОГО блока
+       (сравнение кандидатов {0, 0.25*med, 0.5*med} по минимуму L1-ошибки).
+    2. Оптимальное Δ = 1 медианное масштабирование ненулевых весов блока.
     """
-    def __init__(self, group_size: int = 32, theta: float = 1e-4):
+    def __init__(self, group_size: int = 32, theta: float = 1e-4, auto_theta: bool = True):
         super().__init__()
         self.group_size = group_size
         self.theta = theta
-
-    def _apply_selector(self, w: torch.Tensor) -> torch.Tensor:
-        if HAS_CUPY and w.is_cuda:
-            orig_shape, orig_dtype = w.shape, w.dtype
-            w_f32 = w.view(-1, orig_shape[-1]).contiguous().to(torch.float32)
-            rows, cols = w_f32.shape
-            y_f32 = torch.empty_like(w_f32)
-
-            kernel = cp.RawKernel(SELECTOR_CUDA_CODE, "vcore_selector_kernel")
-            cp_x = cp.from_dlpack(to_dlpack(w_f32))
-            cp_y = cp.from_dlpack(to_dlpack(y_f32))
-
-            block = (16, 16)
-            grid = ((cols + 15) // 16, (rows + 15) // 16)
-            kernel(grid, block, (cp_x, cp_y, rows, cols, float(self.theta)))
-            cp.cuda.Device().synchronize()
-            return y_f32.to(orig_dtype).view(orig_shape)
-
-        return torch.where(torch.abs(w) > self.theta, w, torch.zeros_like(w))
+        self.auto_theta = auto_theta
 
     @torch.no_grad()
     def quantize(self, weights: torch.Tensor):
@@ -69,19 +32,48 @@ class VCoreTernaryQuantizer(nn.Module):
         if weights.numel() % self.group_size != 0:
             raise ValueError(f"Число элементов ({weights.numel()}) должно делиться на group_size={self.group_size}")
 
-        # Шаг 1: Линейный селектор обнуляет шум (|w| <= theta -> 0)
-        pruned = self._apply_selector(weights)
-
-        # Шаг 2: Разбиение на непересекающиеся блоки (режим Δ = 1)
-        blocks = pruned.reshape(-1, self.group_size)
-        ternary_mask = torch.sign(blocks)  # {-1.0, 0.0, +1.0}
-
-        # Оптимальный L1-масштаб по медиане модулей ненулевых весов блока
+        blocks = weights.reshape(-1, self.group_size)
         abs_blocks = torch.abs(blocks)
-        scales = torch.median(abs_blocks, dim=1, keepdim=True).values
+        base_med = torch.median(abs_blocks, dim=1, keepdim=True).values
 
-        w_quant = (ternary_mask * scales).reshape(orig_shape)
-        return w_quant, ternary_mask.reshape(orig_shape), scales.reshape(-1)
+        if not self.auto_theta:
+            pruned = torch.where(abs_blocks > self.theta, blocks, torch.zeros_like(blocks))
+            mask = torch.sign(pruned)
+            scales = torch.median(torch.abs(pruned), dim=1, keepdim=True).values
+            w_quant = (mask * scales).reshape(orig_shape)
+            return w_quant, mask.reshape(orig_shape), scales.reshape(-1)
+
+        # Автоподбор оптимального порога theta_b* для каждого блока по минимуму L1-ошибки
+        candidates = [
+            torch.full_like(base_med, self.theta),
+            0.25 * base_med,
+            0.50 * base_med,
+        ]
+
+        best_err = torch.full((blocks.shape[0],), float("inf"), device=blocks.device, dtype=blocks.dtype)
+        best_mask = torch.zeros_like(blocks)
+        best_scales = torch.zeros_like(base_med)
+
+        for th in candidates:
+            active = abs_blocks > th
+            pruned = torch.where(active, blocks, torch.zeros_like(blocks))
+            mask = torch.sign(pruned)
+
+            # Медиана по активным (ненулевым) элементам блока
+            masked_abs = torch.where(active, abs_blocks, torch.tensor(float("nan"), device=blocks.device, dtype=blocks.dtype))
+            scales = torch.nanmedian(masked_abs, dim=1, keepdim=True).values
+            scales = torch.nan_to_num(scales, nan=0.0)
+
+            w_cand = mask * scales
+            err = torch.sum(torch.abs(blocks - w_cand), dim=1)
+
+            improve = err < best_err
+            best_err = torch.where(improve, err, best_err)
+            best_mask = torch.where(improve.unsqueeze(1), mask, best_mask)
+            best_scales = torch.where(improve.unsqueeze(1), scales, best_scales)
+
+        w_quant = (best_mask * best_scales).reshape(orig_shape)
+        return w_quant, best_mask.reshape(orig_shape), best_scales.reshape(-1)
 
 
 def verify_with_lean4_engine() -> str:
@@ -93,3 +85,4 @@ def verify_with_lean4_engine() -> str:
         check=True,
     )
     return res.stdout
+    
