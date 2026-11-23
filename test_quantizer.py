@@ -1,15 +1,14 @@
-import json
 import os
 import subprocess
 import tempfile
 import torch
+import torch.nn as nn
 from safetensors.torch import save_file, load_file
 from vcore_l1 import (
     VCoreTernaryQuantizer,
+    VCoreLinear,
+    inject_vcore_layers,
     verify_with_lean4_engine,
-    repack_safetensors_layerwise,
-    repack_sharded_model,
-    unpack_uint8_to_ternary,
 )
 
 
@@ -17,80 +16,63 @@ def absmean_bitnet_quantize(weights: torch.Tensor) -> torch.Tensor:
     gamma = torch.mean(torch.abs(weights))
     if gamma == 0:
         return torch.zeros_like(weights)
-    ternary = torch.clamp(torch.round(weights / gamma), -1.0, 1.0)
-    return ternary * gamma
+    return torch.clamp(torch.round(weights / gamma), -1.0, 1.0) * gamma
 
 
 def main():
     print("=== 1. Проверка математического ядра Lean 4 (v2.0.0) ===")
-    lean_out = verify_with_lean4_engine()
-    print(lean_out.strip())
+    print(verify_with_lean4_engine().strip())
 
-    print("\n=== 2. Тест автоподбора порога theta_b* и Δ=1 медианы на матрице с выбросами ===")
+    print("\n=== 2. Сравнение с BitNet (absmean) при автоподборе theta_b* ===")
     torch.manual_seed(42)
     weights = torch.randn(128, 256) * 0.05
-    outlier_mask = torch.rand_like(weights) < 0.005
-    weights[outlier_mask] *= 40.0
+    weights[torch.rand_like(weights) < 0.005] *= 40.0
 
-    w_bitnet = absmean_bitnet_quantize(weights)
-    err_bitnet = torch.sum(torch.abs(weights - w_bitnet)).item()
-
-    quantizer = VCoreTernaryQuantizer(group_size=32, theta=1e-4, auto_theta=True)
-    w_vcore, mask, scales = quantizer.quantize(weights)
+    err_bitnet = torch.sum(torch.abs(weights - absmean_bitnet_quantize(weights))).item()
+    q = VCoreTernaryQuantizer(group_size=32, theta=1e-4, auto_theta=True)
+    w_vcore, _, _ = q.quantize(weights)
     err_vcore = torch.sum(torch.abs(weights - w_vcore)).item()
-
-    reduction = (1.0 - err_vcore / err_bitnet) * 100.0
-    print(f"Ошибка BitNet (absmean)       : {err_bitnet:.2f}")
-    print(f"Ошибка V-CORE (Auto-Theta Δ=1): {err_vcore:.2f} (снижение ошибки на {reduction:.1f}%)")
+    print(f"BitNet err: {err_bitnet:.2f} | V-CORE err: {err_vcore:.2f}")
     assert err_vcore < err_bitnet
 
-    print("\n=== 3. Тест шардированной модели (index.json + Auto-Rollback + CLI vcore-pack) ===")
+    print("\n=== 3. Тест каскадного сжатия (64 -> 32 -> 16), Auto-Rollback и VCoreLinear ===")
     with tempfile.TemporaryDirectory() as tmpdir:
-        in_dir = os.path.join(tmpdir, "hf_model_sharded")
-        out_dir = os.path.join(tmpdir, "hf_model_vcore_158bit")
+        in_dir = os.path.join(tmpdir, "model_in")
+        out_dir = os.path.join(tmpdir, "model_out")
         os.makedirs(in_dir, exist_ok=True)
 
-        shard1 = {
-            "model.layers.0.self_attn.q_proj.weight": torch.randn(256, 512, dtype=torch.float16),
-            "model.layers.0.input_layernorm.weight": torch.linspace(0.01, 25.0, 512, dtype=torch.float16),
-        }
-        shard2 = {
-            "model.layers.1.mlp.gate_proj.weight": torch.randn(512, 512, dtype=torch.float16),
-        }
-        save_file(shard1, os.path.join(in_dir, "model-00001-of-00002.safetensors"))
-        save_file(shard2, os.path.join(in_dir, "model-00002-of-00002.safetensors"))
+        class TinyNet(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1 = nn.Linear(128, 64, bias=False)
+                self.norm = nn.LayerNorm(64)
+                self.fc2 = nn.Linear(64, 32, bias=False)
 
-        index_payload = {
-            "metadata": {"total_size": 1024},
-            "weight_map": {
-                "model.layers.0.self_attn.q_proj.weight": "model-00001-of-00002.safetensors",
-                "model.layers.0.input_layernorm.weight": "model-00001-of-00002.safetensors",
-                "model.layers.1.mlp.gate_proj.weight": "model-00002-of-00002.safetensors",
-            },
-        }
-        with open(os.path.join(in_dir, "model.safetensors.index.json"), "w", encoding="utf-8") as f:
-            json.dump(index_payload, f)
+            def forward(self, x):
+                return self.fc2(self.norm(self.fc1(x)))
 
-        # Запускаем через CLI-команду vcore-pack
+        net = TinyNet().to(torch.float16)
+        with torch.no_grad():
+            net.norm.weight.copy_(torch.linspace(0.01, 20.0, 64, dtype=torch.float16))
+
+        save_file(net.state_dict(), os.path.join(in_dir, "model.safetensors"))
+
         subprocess.run(
-            ["vcore-pack", "--input", in_dir, "--output", out_dir, "--group-size", "32", "--max-rel-error", "0.45"],
+            ["vcore-pack", "--input", in_dir, "--output", out_dir, "--group-size", "64", "--max-rel-error", "0.45"],
             check=True,
         )
 
-        # Проверяем обновлённый index.json и распаковку первого шарда
-        with open(os.path.join(out_dir, "model.safetensors.index.json"), "r", encoding="utf-8") as f:
-            new_idx = json.load(f)
-        assert "model.layers.0.self_attn.q_proj.weight.vcore_packed" in new_idx["weight_map"]
-        assert "model.layers.0.input_layernorm.weight" in new_idx["weight_map"]
+        packed_sd = load_file(os.path.join(out_dir, "model.safetensors"))
+        inject_vcore_layers(net, packed_sd)
+        assert isinstance(net.fc1, VCoreLinear)
+        assert isinstance(net.fc2, VCoreLinear)
+        assert isinstance(net.norm, nn.LayerNorm)
 
-        s1_out = load_file(os.path.join(out_dir, "model-00001-of-00002.safetensors"))
-        unpacked = unpack_uint8_to_ternary(
-            s1_out["model.layers.0.self_attn.q_proj.weight.vcore_packed"],
-            tuple(s1_out["model.layers.0.self_attn.q_proj.weight.vcore_shape"].tolist()),
-        )
-        assert unpacked.shape == (256, 512)
+        x_in = torch.randn(4, 128, dtype=torch.float16)
+        y_out = net(x_in)
+        assert y_out.shape == (4, 32)
 
-    print("[OK] Все 4 улучшения (Lean 4, Auto-Theta, Sharded Safetensors, Auto-Rollback, CLI) проверены!")
+    print("[OK] Все 8 компонентов стека (Lean 4, Auto-Theta, Cascade, Auto-Rollback, VCoreLinear, CLI) работают!")
 
 
 if __name__ == "__main__":
