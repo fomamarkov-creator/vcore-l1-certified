@@ -2,7 +2,7 @@
 
 **Lean Core:** `l1-projection-complexity-lean4` (`v3.0.0` — 8 Verified Modules) | **Toolchain:** Lean `v4.37.0-rc1` | **Backend:** PyTorch / Warp-CUDA (`sm_70`–`sm_90`) | **License:** AGPL-3.0
 
-# V-CORE \(\ell_1\)-Certified: Hybrid Lean 4 + GPU 1.58-Bit & INT4 Quantization & Inference Engine
+# V-CORE (ℓ₁)-Certified: Hybrid Lean 4 + GPU 1.58-Bit & INT4 Quantization & Inference Engine
 
 A complete symbolic-numeric compression and inference runtime combining a **machine-checked Lean 4 formal verification core** (`l1-projection-complexity-lean4`, release `v3.0.0`) with **activation-weighted \(\ell_1\) medians**, **bounded-treewidth (Δ = 2) FPT dynamic programming**, **channel-outlier permutation**, **multi-stage precision cascade (`1.58-bit -> INT4 -> FP16`) with Auto-Rollback**, **2-bit KV-cache compression**, and **warp-parallel CUDA kernels** (`libvcore_engine.so`).
 
