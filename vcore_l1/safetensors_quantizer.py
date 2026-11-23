@@ -67,7 +67,8 @@ def _pad_to_group(flat: torch.Tensor, group_size: int) -> Tuple[torch.Tensor, in
         return flat, orig_numel
     pad = group_size - rem
     return torch.cat([flat, torch.zeros(pad, dtype=flat.dtype, device=flat.device)]), orig_numel
-    @torch.no_grad()
+    
+@torch.no_grad()
 def quantize_ternary_exact_critical(
     blocks: torch.Tensor,
     imp_blocks: Optional[torch.Tensor] = None,
