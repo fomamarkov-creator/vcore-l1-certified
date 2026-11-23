@@ -4,7 +4,7 @@
 
 # V-CORE \(\ell_1\)-Certified: Hybrid Lean 4 + GPU 1.58-Bit & INT4 Quantization & Inference Engine
 
-A complete symbolic-numeric compression and inference runtime combining a **machine-checked Lean 4 formal verification core** (`l1-projection-complexity-lean4`, release `v3.0.0`) with **activation-weighted \(\ell_1\) medians**, **channel-outlier permutation**, **multi-stage precision cascade (`1.58-bit -> INT4 -> FP16`) with Auto-Rollback**, **2-bit KV-cache compression**, and **warp-parallel CUDA kernels** (`libvcore_engine.so`).
+A complete symbolic-numeric compression and inference runtime combining a **machine-checked Lean 4 formal verification core** (`l1-projection-complexity-lean4`, release `v3.0.0`) with **activation-weighted \(\ell_1\) medians**, **bounded-treewidth (Δ = 2) FPT dynamic programming**, **channel-outlier permutation**, **multi-stage precision cascade (`1.58-bit -> INT4 -> FP16`) with Auto-Rollback**, **2-bit KV-cache compression**, and **warp-parallel CUDA kernels** (`libvcore_engine.so`).
 
 * **Author:** E. S. Markov (ORCID: `0009-0005-2235-5464`)
 * **Affiliation:** Independent Researcher, Astrakhan, Russia
@@ -16,9 +16,9 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 
 1. **Formal Lean 4 Verification (`CertifierMain.lean` → `vcore_certifier`):**
    * Links directly against all 8 verified modules of `l1-projection-complexity-lean4` (`v3.0.0`)—including `MarkovL1TernaryQuantizer`, `MarkovL1WeightedTernary`, and `MarkovL1TreewidthSolver`—to certify exact-rational (\(\mathbb{Q}\)) optimality prior to GPU execution.
-2. **Activation-Weighted \(\ell_1\) Medians & Channel Outlier Grouping (`vcore_l1/`):**
+2. **Activation-Weighted \(\ell_1\) Medians, Treewidth FPT & Channel Outlier Grouping (`vcore_l1/`):**
    * Sorts weight columns by \(\ell_1\)-norm (`vcore_perm`) to isolate heavy-tailed outliers into dedicated Δ = 1 blocks.
-   * Supports activation-importance weights (`activation_scales`, \(\gamma_j = \mathbb{E}[\vert{}x_j\vert{}]\)) to protect salient input channels via exact weighted \(\ell_1\) medians.
+   * Supports activation-importance weights (`--calib-samples`, \(\gamma_j = \mathbb{E}[\vert{}x_j\vert{}]\)) to protect salient input channels via exact weighted \(\ell_1\) medians, plus `solve_chain_overlap_fpt` for structured Δ = 2 chain overlaps.
 3. **Multi-Stage Precision Cascade & VRAM Budgeter (`vcore_l1/safetensors_quantizer.py`, `vcore-pack`):**
    * Automatically steps down block sizes (`64 -> 32 -> 16` in 1.58-bit), falls back to **4-bit blockwise `INT4`** (`{-7..+7}`), and rolls back sensitive 1D layers (`LayerNorm`, `bias`) to `FP16` under `--max-rel-error` or `--target-vram-gb`.
    * Supports local `.safetensors`, sharded directories (`model.safetensors.index.json`), and **streaming Hugging Face Hub compression** (`--hf-repo`).
@@ -40,10 +40,13 @@ bash setup.sh
 
 ### 2. One-Line Model Compression (`vcore-pack`)
 ```bash
-# Stream and compress a model directly from Hugging Face Hub under a 4 GB VRAM budget
+# Data-free streaming compression from Hugging Face Hub under a 4 GB VRAM budget
 vcore-pack --hf-repo Qwen/Qwen2.5-1.5B --output ./qwen25_vcore --target-vram-gb 4.0
 
-# Or compress a local sharded model folder
+# Activation-aware weighted 1.58-bit compression using 4 calibration samples
+vcore-pack --hf-repo Qwen/Qwen2.5-1.5B --output ./qwen25_vcore_aw --calib-samples 4 --target-vram-gb 4.0
+
+# Compress a local sharded model folder
 vcore-pack --input ./hf_model_dir --output ./model_vcore --group-size 64 --max-rel-error 0.40
 ```
 
