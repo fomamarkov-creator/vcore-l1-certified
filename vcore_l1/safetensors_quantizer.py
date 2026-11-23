@@ -1,7 +1,10 @@
 # Copyright (C) 2026 Efim Sergeevich Markov (ef.87@mail.ru)
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
+import glob
+import json
 import os
+import shutil
 from typing import Dict, Tuple
 import torch
 from safetensors.torch import load_file, save_file
@@ -45,7 +48,6 @@ def unpack_uint8_to_ternary(packed: torch.Tensor, orig_shape: Tuple[int, ...]) -
 
 
 def _pad_to_group(flat: torch.Tensor, group_size: int) -> Tuple[torch.Tensor, int]:
-    """Дополняет одномерный или нестандартный тензор нулями до кратности group_size."""
     orig_numel = flat.numel()
     rem = orig_numel % group_size
     if rem == 0:
@@ -62,16 +64,15 @@ def repack_safetensors_layerwise(
     theta: float = 1e-4,
     max_rel_error: float = 0.40,
     include_aux_layers: bool = True,
+    auto_theta: bool = True,
 ) -> Dict[str, float]:
     """
-    Адаптивная послойная переупаковка модели (.safetensors) в 1.58-bit формат V-CORE
-    с проверкой всех слоёв (включая 1D norm/bias при include_aux_layers=True)
-    и автоматическим откатом (rollback) в FP16, если относительная L1-ошибка
-    слоя превышает порог max_rel_error.
+    Адаптивная послойная переупаковка одного .safetensors файла в 1.58-bit формат V-CORE
+    с автоподбором порога theta_b* на каждом блоке и автоматическим откатом (rollback)
+    в FP16 при превышении допустимой относительной L1-ошибки max_rel_error.
     """
     state_dict = load_file(input_path)
     out_tensors: Dict[str, torch.Tensor] = {}
-    quantizer = VCoreTernaryQuantizer(group_size=group_size, theta=theta)
 
     quantized_layers = 0
     rolled_back_layers = 0
@@ -90,11 +91,10 @@ def repack_safetensors_layerwise(
         w_f32 = tensor.to(torch.float32)
         orig_l1 = torch.sum(torch.abs(w_f32)).item()
 
-        # Подбираем адаптивный размер блока для малых 1D-слоёв (norm/bias)
         eff_group = min(group_size, w_f32.numel())
         padded_flat, orig_numel = _pad_to_group(w_f32.reshape(-1), eff_group)
 
-        local_q = VCoreTernaryQuantizer(group_size=eff_group, theta=theta)
+        local_q = VCoreTernaryQuantizer(group_size=eff_group, theta=theta, auto_theta=auto_theta)
         w_quant_pad, mask_pad, scales = local_q.quantize(padded_flat)
 
         w_quant = w_quant_pad[:orig_numel].reshape(tensor.shape)
@@ -105,7 +105,6 @@ def repack_safetensors_layerwise(
 
         total_l1_orig += orig_l1
 
-        # Контроль качества: если слой деградирует сильнее порога -> откат в исходный формат
         if rel_err <= max_rel_error:
             packed_bytes, orig_shape = pack_ternary_to_uint8(mask)
             out_tensors[f"{name}.vcore_packed"] = packed_bytes.cpu()
@@ -118,6 +117,7 @@ def repack_safetensors_layerwise(
             out_tensors[name] = tensor.cpu()
             rolled_back_layers += 1
 
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     save_file(out_tensors, output_path)
 
     orig_mb = os.path.getsize(input_path) / (1024 * 1024)
@@ -132,4 +132,77 @@ def repack_safetensors_layerwise(
         "total_l1_orig": total_l1_orig,
         "total_l1_err": total_l1_err,
     }
+
+
+def repack_sharded_model(
+    input_dir: str,
+    output_dir: str,
+    group_size: int = 32,
+    theta: float = 1e-4,
+    max_rel_error: float = 0.40,
+    include_aux_layers: bool = True,
+    auto_theta: bool = True,
+) -> Dict[str, float]:
+    """
+    Послойная переупаковка целой папки модели Hugging Face (включая шардированные
+    чекпоинты model-00001-of-0000N.safetensors + обновление model.safetensors.index.json
+    и копирование tokenizer/config.json).
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    shard_files = sorted(glob.glob(os.path.join(input_dir, "*.safetensors")))
+    if not shard_files:
+        raise FileNotFoundError(f"В папке {input_dir} не найдены файлы .safetensors")
+
+    agg = {
+        "shards_processed": len(shard_files),
+        "quantized_layers": 0,
+        "rolled_back_layers": 0,
+        "orig_size_mb": 0.0,
+        "packed_size_mb": 0.0,
+        "total_l1_orig": 0.0,
+        "total_l1_err": 0.0,
+    }
+
+    new_weight_map: Dict[str, str] = {}
+
+    for shard_path in shard_files:
+        fname = os.path.basename(shard_path)
+        out_shard = os.path.join(output_dir, fname)
+        st = repack_safetensors_layerwise(
+            shard_path,
+            out_shard,
+            group_size=group_size,
+            theta=theta,
+            max_rel_error=max_rel_error,
+            include_aux_layers=include_aux_layers,
+            auto_theta=auto_theta,
+        )
+        agg["quantized_layers"] += st["quantized_layers"]
+        agg["rolled_back_layers"] += st["rolled_back_layers"]
+        agg["orig_size_mb"] += st["orig_size_mb"]
+        agg["packed_size_mb"] += st["packed_size_mb"]
+        agg["total_l1_orig"] += st["total_l1_orig"]
+        agg["total_l1_err"] += st["total_l1_err"]
+
+        # Обновляем карту весов для индексного файла Hugging Face
+        saved_keys = load_file(out_shard).keys()
+        for k in saved_keys:
+            new_weight_map[k] = fname
+
+    # Копируем конфигурационные файлы и токенизатор, обновляем index.json
+    for item in os.listdir(input_dir):
+        src_item = os.path.join(input_dir, item)
+        dst_item = os.path.join(output_dir, item)
+        if item == "model.safetensors.index.json":
+            with open(src_item, "r", encoding="utf-8") as f:
+                idx_data = json.load(f)
+            idx_data["weight_map"] = new_weight_map
+            idx_data.setdefault("metadata", {})["vcore_quantized"] = "1.58-bit-delta1"
+            with open(dst_item, "w", encoding="utf-8") as f:
+                json.dump(idx_data, f, indent=2)
+        elif not item.endswith(".safetensors") and os.path.isfile(src_item):
+            shutil.copy2(src_item, dst_item)
+
+    agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
+    return agg
     
