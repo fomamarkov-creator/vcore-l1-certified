@@ -73,7 +73,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: |
-          pip install numpy safetensors torch --index-url https://pytorch.org
+          pip install numpy safetensors torch
           pip install -e . --no-deps
           python test_quantizer.py
 
