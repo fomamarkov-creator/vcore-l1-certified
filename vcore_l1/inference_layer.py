@@ -13,6 +13,7 @@ from .cuda_quantizer import VCoreTernaryQuantizer
 from .safetensors_quantizer import (
     pack_ternary_to_uint8,
     unpack_uint8_to_ternary,
+    pack_int4_to_uint8,
     unpack_uint8_to_int4,
 )
 
@@ -46,21 +47,35 @@ _CUDA_LIB = _load_cuda_lib()
 
 
 class VCoreKVCacheQuantizer:
-    """Сжатие KV-кэша на лету в 2-битный формат с Δ=1 медианными масштабами."""
-    def __init__(self, group_size: int = 32, theta: float = 1e-4):
+    """Сжатие KV-кэша на лету в 4-битный (или 2-битный) формат с L1-медианными масштабами."""
+    def __init__(self, group_size: int = 32, theta: float = 1e-4, bits: int = 4):
         self.group_size = group_size
+        self.bits = bits
         self.quantizer = VCoreTernaryQuantizer(group_size=group_size, theta=theta, auto_theta=True)
 
+    @torch.no_grad()
     def compress_kv(self, kv_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...]]:
         orig_shape = tuple(kv_tensor.shape)
         flat = kv_tensor.reshape(-1).to(torch.float32)
         rem = flat.numel() % self.group_size
         if rem != 0:
             flat = torch.cat([flat, torch.zeros(self.group_size - rem, dtype=flat.dtype, device=flat.device)])
-        _, mask, scales = self.quantizer.quantize(flat)
-        packed, _ = pack_ternary_to_uint8(mask)
-        return packed, scales.to(torch.float16), orig_shape
 
+        if self.bits == 2:
+            _, mask, scales = self.quantizer.quantize(flat)
+            packed, _ = pack_ternary_to_uint8(mask)
+            return packed, scales.to(torch.float16), orig_shape
+
+        blocks = flat.view(-1, self.group_size)
+        abs_b = torch.abs(blocks)
+        med_b = torch.median(abs_b, dim=1, keepdim=True).values
+        max_b = torch.max(abs_b, dim=1, keepdim=True).values
+        step = torch.clamp(torch.maximum(med_b / 2.5, max_b / 7.0), min=1e-8)
+        q_int = torch.clamp(torch.round(blocks / step), -7.0, 7.0)
+        packed, _ = pack_int4_to_uint8(q_int.reshape(-1))
+        return packed, step.reshape(-1).to(torch.float16), orig_shape
+
+    @torch.no_grad()
     def decompress_kv(
         self,
         packed: torch.Tensor,
@@ -72,20 +87,23 @@ class VCoreKVCacheQuantizer:
         for d in orig_shape:
             total_elems *= d
         padded_len = ((total_elems + self.group_size - 1) // self.group_size) * self.group_size
-        mask = unpack_uint8_to_ternary(packed, (padded_len,)).to(packed.device)
-        restored = (mask.reshape(-1, self.group_size) * scales.to(torch.float32).unsqueeze(1)).reshape(-1)
+        if self.bits == 2:
+            grid = unpack_uint8_to_ternary(packed, (padded_len,)).to(packed.device)
+        else:
+            grid = unpack_uint8_to_int4(packed, (padded_len,)).to(packed.device)
+        restored = (grid.reshape(-1, self.group_size) * scales.to(torch.float32).unsqueeze(1)).reshape(-1)
         return restored[:total_elems].reshape(orig_shape).to(dtype)
 
 
 class VCoreDynamicCache:
     """
     Совместимый с Hugging Face transformers (v4 и v5+) кэш генерации,
-    сжимающий историю ключей и значений на лету по Δ=1 медиане.
+    сжимающий историю ключей и значений на лету с L1-медианными масштабами.
     """
     is_compileable = False
 
-    def __init__(self, group_size: int = 32):
-        self.kv_q = VCoreKVCacheQuantizer(group_size=group_size)
+    def __init__(self, group_size: int = 32, bits: int = 4):
+        self.kv_q = VCoreKVCacheQuantizer(group_size=group_size, bits=bits)
         self.key_cache: List[Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], torch.dtype]] = []
         self.value_cache: List[Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], torch.dtype]] = []
         self.layers: List[Any] = []
@@ -125,9 +143,10 @@ class VCoreDynamicCache:
         return None
 
     def get_mask_sizes(self, cache_position: Any, layer_idx: int) -> Tuple[int, int]:
-        query_length = cache_position if isinstance(cache_position, int) else int(cache_position.shape[0])
+        query_length = cache_position if isinstance(cache_position, int) else int(cache_position.shape)
         kv_length = self.get_seq_length(layer_idx) + query_length
         return kv_length, 0
+            
 
 class VCoreLinear(nn.Module):
     """
