@@ -9,23 +9,25 @@ import tempfile
 from typing import Dict, List, Optional, Tuple
 import torch
 from safetensors.torch import load_file, save_file
-from .cuda_quantizer import VCoreTernaryQuantizer
+from .cuda_quantizer import VCoreTernaryQuantizer, _weighted_median_1d
 
 
 def pack_ternary_to_uint8(ternary_mask: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, ...]]:
-    """2-битная упаковка {-1, 0, +1} в байты uint8 (4 веса в 1 байт)."""
     orig_shape = tuple(ternary_mask.shape)
     flat = (ternary_mask.reshape(-1).to(torch.int8) + 1).to(torch.uint8)
     pad_len = (4 - (flat.numel() % 4)) % 4
     if pad_len > 0:
         flat = torch.cat([flat, torch.ones(pad_len, dtype=torch.uint8, device=flat.device)])
     grouped = flat.view(-1, 4)
-    packed = grouped[:, 0] | (grouped[:, 1] << 2) | (grouped[:, 2] << 4) | (grouped[:, 3] << 6)
+    b0 = grouped.select(1, 0)
+    b1 = grouped.select(1, 1) << 2
+    b2 = grouped.select(1, 2) << 4
+    b3 = grouped.select(1, 3) << 6
+    packed = b0 | b1 | b2 | b3
     return packed.contiguous(), orig_shape
 
 
 def unpack_uint8_to_ternary(packed: torch.Tensor, orig_shape: Tuple[int, ...]) -> torch.Tensor:
-    """Распаковка 2-битных байтов uint8 обратно в {-1, 0, +1}."""
     total_elems = 1
     for d in orig_shape:
         total_elems *= d
@@ -33,29 +35,27 @@ def unpack_uint8_to_ternary(packed: torch.Tensor, orig_shape: Tuple[int, ...]) -
     b1 = (packed >> 2) & 0x03
     b2 = (packed >> 4) & 0x03
     b3 = (packed >> 6) & 0x03
-    unpacked = torch.stack([b0, b1, b2, b3], dim=1).reshape(-1)[:total_elems]
+    unpacked = torch.stack([b0, b1, b2, b3], dim=1).reshape(-1).narrow(0, 0, total_elems)
     return unpacked.to(torch.float32) - 1.0
 
 
 def pack_int4_to_uint8(int4_vals: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, ...]]:
-    """4-битная упаковка целых весов {-7..+7} в байты uint8 (2 веса в 1 байт)."""
     orig_shape = tuple(int4_vals.shape)
     flat = (torch.clamp(int4_vals.reshape(-1), -7, 7).to(torch.int8) + 7).to(torch.uint8)
     if flat.numel() % 2 != 0:
-        flat = torch.cat([flat, torch.tensor([7], dtype=torch.uint8, device=flat.device)])
+        flat = torch.cat([flat, torch.full((1,), 7, dtype=torch.uint8, device=flat.device)])
     grouped = flat.view(-1, 2)
-    packed = (grouped[:, 0] & 0x0F) | ((grouped[:, 1] & 0x0F) << 4)
+    packed = (grouped.select(1, 0) & 0x0F) | ((grouped.select(1, 1) & 0x0F) << 4)
     return packed.contiguous(), orig_shape
 
 
 def unpack_uint8_to_int4(packed: torch.Tensor, orig_shape: Tuple[int, ...]) -> torch.Tensor:
-    """Распаковка 4-битных байтов uint8 обратно в {-7..+7}."""
     total_elems = 1
     for d in orig_shape:
         total_elems *= d
     low = (packed & 0x0F).to(torch.float32) - 7.0
     high = ((packed >> 4) & 0x0F).to(torch.float32) - 7.0
-    unpacked = torch.stack([low, high], dim=1).reshape(-1)[:total_elems]
+    unpacked = torch.stack([low, high], dim=1).reshape(-1).narrow(0, 0, total_elems)
     return unpacked
 
 
@@ -67,39 +67,39 @@ def _pad_to_group(flat: torch.Tensor, group_size: int) -> Tuple[torch.Tensor, in
     pad = group_size - rem
     return torch.cat([flat, torch.zeros(pad, dtype=flat.dtype, device=flat.device)]), orig_numel
 
-
-def quantize_ternary_exact_critical(blocks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Точный алгоритм из MarkovL1TernaryQuantizer.lean (quantizeTernaryExactQ):
-    перебирает все критические пороги {0} U {|w_i|} внутри каждого блока и выбирает
-    пару (theta_b*, alpha_b*), дающую глобальный минимум L1-ошибки 1.58-bit квантования.
-    """
-    num_blocks, g = blocks.shape
+def quantize_ternary_exact_critical(
+    blocks: torch.Tensor,
+    imp_blocks: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_blocks = blocks.size(0)
+    g = blocks.size(1)
     abs_b = torch.abs(blocks)
     sorted_abs, _ = torch.sort(abs_b, dim=1)
+    if imp_blocks is None:
+        imp_blocks = torch.ones_like(blocks)
 
     best_err = torch.full((num_blocks,), float("inf"), device=blocks.device, dtype=blocks.dtype)
     best_mask = torch.zeros_like(blocks)
     best_scales = torch.zeros((num_blocks, 1), device=blocks.device, dtype=blocks.dtype)
 
-    # Кандидаты порогов: 0 и все порядковые статистики |w_(k)| блока (кроме максимума)
     for k in range(g):
-        th = torch.zeros((num_blocks, 1), device=blocks.device, dtype=blocks.dtype) if k == 0 else sorted_abs[:, k - 1 : k]
+        th = torch.zeros((num_blocks, 1), device=blocks.device, dtype=blocks.dtype) if k == 0 else sorted_abs.narrow(1, k - 1, 1)
         active = abs_b > th
         mask = torch.where(active, torch.sign(blocks), torch.zeros_like(blocks))
-        masked_abs = torch.where(active, abs_b, torch.tensor(float("nan"), device=blocks.device, dtype=blocks.dtype))
-        scales = torch.nan_to_num(torch.nanmedian(masked_abs, dim=1, keepdim=True).values, nan=0.0)
+        active_imp = torch.where(active, imp_blocks, torch.zeros_like(imp_blocks))
+        scales = _weighted_median_1d(abs_b, active_imp)
 
         w_cand = mask * scales
-        err = torch.sum(torch.abs(blocks - w_cand), dim=1)
+        err = torch.sum(imp_blocks * torch.abs(blocks - w_cand), dim=1)
         improve = err < best_err
         best_err = torch.where(improve, err, best_err)
         best_mask = torch.where(improve.unsqueeze(1), mask, best_mask)
         best_scales = torch.where(improve.unsqueeze(1), scales, best_scales)
 
     return best_mask * best_scales, best_mask, best_scales.reshape(-1)
+
+
 def _quantize_int4_blockwise(w_f32: torch.Tensor, group_size: int = 32) -> Tuple[torch.Tensor, torch.Tensor, float]:
-    """Поблочное 4-битное квантование {-7..+7} с медианной калибровкой Δ=1."""
     flat = w_f32.reshape(-1)
     padded, orig_numel = _pad_to_group(flat, group_size)
     blocks = padded.view(-1, group_size)
@@ -110,9 +110,9 @@ def _quantize_int4_blockwise(w_f32: torch.Tensor, group_size: int = 32) -> Tuple
     step = torch.clamp(step, min=1e-8)
 
     q_int = torch.clamp(torch.round(blocks / step), -7.0, 7.0)
-    w_hat = (q_int * step).reshape(-1)[:orig_numel].reshape(w_f32.shape)
+    w_hat = (q_int * step).reshape(-1).narrow(0, 0, orig_numel).reshape(w_f32.shape)
     err = torch.sum(torch.abs(w_f32 - w_hat)).item()
-    return q_int.reshape(-1)[:orig_numel].reshape(w_f32.shape), step.reshape(-1), err
+    return q_int.reshape(-1).narrow(0, 0, orig_numel).reshape(w_f32.shape), step.reshape(-1), err
 
 
 def _quantize_tensor_cascade(
@@ -122,25 +122,35 @@ def _quantize_tensor_cascade(
     max_rel_error: float,
     auto_theta: bool,
     allow_int4: bool = True,
+    act_scales: Optional[torch.Tensor] = None,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor, int, int, float]]:
     orig_l1 = torch.sum(torch.abs(w_f32)).item()
     flat = w_f32.reshape(-1)
+
+    imp_flat = None
+    if act_scales is not None and w_f32.ndim == 2 and act_scales.numel() == w_f32.size(1):
+        imp_flat = torch.abs(act_scales).view(1, -1).expand_as(w_f32).reshape(-1).to(w_f32.device, dtype=w_f32.dtype)
 
     for g in cascade_groups:
         eff_g = min(g, flat.numel())
         if eff_g <= 0:
             continue
         padded_flat, orig_numel = _pad_to_group(flat, eff_g)
+        imp_padded = None
+        if imp_flat is not None:
+            imp_padded, _ = _pad_to_group(imp_flat, eff_g)
+
         if auto_theta and eff_g <= 64:
-            w_q_pad, mask_pad, scales = quantize_ternary_exact_critical(padded_flat.view(-1, eff_g))
+            imp_blocks = imp_padded.view(-1, eff_g) if imp_padded is not None else None
+            w_q_pad, mask_pad, scales = quantize_ternary_exact_critical(padded_flat.view(-1, eff_g), imp_blocks=imp_blocks)
             w_q_pad = w_q_pad.reshape(-1)
             mask_pad = mask_pad.reshape(-1)
         else:
             q = VCoreTernaryQuantizer(group_size=eff_g, theta=theta, auto_theta=auto_theta)
-            w_q_pad, mask_pad, scales = q.quantize(padded_flat)
+            w_q_pad, mask_pad, scales = q.quantize(padded_flat, activation_scales=imp_padded)
 
-        w_q = w_q_pad[:orig_numel].reshape(w_f32.shape)
-        mask = mask_pad[:orig_numel].reshape(w_f32.shape)
+        w_q = w_q_pad.narrow(0, 0, orig_numel).reshape(w_f32.shape)
+        mask = mask_pad.narrow(0, 0, orig_numel).reshape(w_f32.shape)
         err = torch.sum(torch.abs(w_f32 - w_q)).item()
         if (err / (orig_l1 + 1e-8)) <= max_rel_error:
             return mask, scales, eff_g, 2, err
@@ -178,7 +188,7 @@ def _estimate_threshold_for_vram(
         padded, orig_n = _pad_to_group(w_f32.reshape(-1), eff_g)
         q = VCoreTernaryQuantizer(group_size=eff_g, theta=theta, auto_theta=auto_theta)
         w_q, _, _ = q.quantize(padded)
-        rel_err = torch.sum(torch.abs(w_f32 - w_q[:orig_n].reshape(t.shape))).item() / (orig_l1 + 1e-8)
+        rel_err = torch.sum(torch.abs(w_f32 - w_q.narrow(0, 0, orig_n).reshape(t.shape))).item() / (orig_l1 + 1e-8)
         fp_b = t.numel() * 2
         q2_b = (t.numel() + 3) // 4 + ((t.numel() + eff_g - 1) // eff_g) * 2
         layer_profiles.append((rel_err, fp_b, q2_b))
@@ -192,6 +202,7 @@ def _estimate_threshold_for_vram(
         cur_bytes -= (fp_b - q2_b)
         chosen_thresh = max(chosen_thresh, rel_err + 1e-4)
     return min(chosen_thresh, 0.95)
+
 def repack_safetensors_layerwise(
     input_path: str,
     output_path: str,
@@ -203,6 +214,7 @@ def repack_safetensors_layerwise(
     cascade: bool = True,
     target_vram_gb: Optional[float] = None,
     channel_perm: bool = True,
+    activation_map: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Dict[str, float]:
     state_dict = load_file(input_path)
     if target_vram_gb is not None and target_vram_gb > 0:
@@ -233,13 +245,18 @@ def repack_safetensors_layerwise(
         w_f32 = tensor.to(torch.float32)
         total_l1_orig += torch.sum(torch.abs(w_f32)).item()
 
+        act_s = activation_map.get(name, None) if activation_map is not None else None
         perm = None
-        if channel_perm and w_f32.ndim == 2 and w_f32.shape[1] >= 16:
+        if channel_perm and w_f32.ndim == 2 and w_f32.size(1) >= 16:
             col_l1 = torch.sum(torch.abs(w_f32), dim=0)
+            if act_s is not None and act_s.numel() == w_f32.size(1):
+                col_l1 = col_l1 * torch.abs(act_s).to(col_l1.device, dtype=col_l1.dtype)
             perm = torch.argsort(col_l1, descending=True)
-            w_work = w_f32[:, perm]
+            w_work = w_f32.index_select(1, perm)
+            act_work = act_s.index_select(0, perm.cpu()) if (act_s is not None and act_s.numel() == w_f32.size(1)) else None
         else:
             w_work = w_f32
+            act_work = act_s
 
         res = _quantize_tensor_cascade(
             w_f32=w_work,
@@ -248,6 +265,7 @@ def repack_safetensors_layerwise(
             max_rel_error=max_rel_error,
             auto_theta=auto_theta,
             allow_int4=cascade,
+            act_scales=act_work,
         )
 
         if res is not None:
@@ -289,7 +307,6 @@ def repack_safetensors_layerwise(
         "total_l1_err": total_l1_err,
     }
 
-
 def repack_sharded_model(
     input_dir: str,
     output_dir: str,
@@ -300,6 +317,7 @@ def repack_sharded_model(
     auto_theta: bool = True,
     cascade: bool = True,
     target_vram_gb: Optional[float] = None,
+    activation_map: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Dict[str, float]:
     os.makedirs(output_dir, exist_ok=True)
     shard_files = sorted(glob.glob(os.path.join(input_dir, "*.safetensors")))
@@ -332,6 +350,7 @@ def repack_sharded_model(
             auto_theta=auto_theta,
             cascade=cascade,
             target_vram_gb=per_shard_vram,
+            activation_map=activation_map,
         )
         for k in (
             "quantized_158bit_layers",
@@ -372,6 +391,7 @@ def repack_hf_hub_model(
     max_rel_error: float = 0.40,
     token: Optional[str] = None,
     target_vram_gb: Optional[float] = None,
+    activation_map: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Dict[str, float]:
     from huggingface_hub import HfApi, hf_hub_download
 
@@ -412,6 +432,7 @@ def repack_hf_hub_model(
                 theta=theta,
                 max_rel_error=max_rel_error,
                 target_vram_gb=per_shard_vram,
+                activation_map=activation_map,
             )
             for k in (
                 "quantized_158bit_layers",
@@ -441,4 +462,4 @@ def repack_hf_hub_model(
 
     agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
     return agg
-        
+    
