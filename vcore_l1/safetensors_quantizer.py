@@ -1,77 +1,102 @@
+# Copyright (C) 2026 Efim Sergeevich Markov (ef.87@mail.ru)
+# Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+
 import os
+from typing import Dict, Tuple
 import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
-from .cuda_quantizer import VCoreTernaryQuantizer, verify_with_lean4_engine
+from safetensors.torch import load_file, save_file
+from .cuda_quantizer import VCoreTernaryQuantizer
 
 
-def quantize_safetensors_model(
+def pack_ternary_to_uint8(ternary_mask: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, ...]]:
+    """
+    Физическая 2-битная упаковка тернарных весов {-1, 0, +1} в байты uint8
+    (4 веса в 1 байт: -1 -> 0, 0 -> 1, +1 -> 2).
+    """
+    orig_shape = tuple(ternary_mask.shape)
+    flat = (ternary_mask.reshape(-1).to(torch.int8) + 1).to(torch.uint8)  # {0, 1, 2}
+    pad_len = (4 - (flat.numel() % 4)) % 4
+    if pad_len > 0:
+        flat = torch.cat([flat, torch.ones(pad_len, dtype=torch.uint8, device=flat.device)])
+
+    grouped = flat.view(-1, 4)
+    packed = (
+        grouped[:, 0]
+        | (grouped[:, 1] << 2)
+        | (grouped[:, 2] << 4)
+        | (grouped[:, 3] << 6)
+    )
+    return packed.contiguous(), orig_shape
+
+
+def unpack_uint8_to_ternary(packed: torch.Tensor, orig_shape: Tuple[int, ...]) -> torch.Tensor:
+    """Мгновенная распаковка байтов uint8 обратно в тернарную маску {-1, 0, +1}."""
+    total_elems = 1
+    for d in orig_shape:
+        total_elems *= d
+
+    b0 = packed & 0x03
+    b1 = (packed >> 2) & 0x03
+    b2 = (packed >> 4) & 0x03
+    b3 = (packed >> 6) & 0x03
+
+    unpacked = torch.stack([b0, b1, b2, b3], dim=1).reshape(-1)[:total_elems]
+    return unpacked.to(torch.float32) - 1.0
+
+
+def repack_safetensors_layerwise(
     input_path: str,
     output_path: str,
     group_size: int = 32,
     theta: float = 1e-4,
-    verify_lean: bool = True,
-):
+) -> Dict[str, float]:
     """
-    Применяет сертифицированное 1.58-bit квантование (LinearSelector + Δ=1 медиана)
-    ко всем линейным матрицам в файле весов Hugging Face (.safetensors),
-    изолируя norm, embed, bias и lm_head.
+    Послойная переупаковка всей модели из .safetensors в сжатый 1.58-bit формат V-CORE.
+    Сохраняет packed-байты (uint8) и оптимальные Δ=1 медианные масштабы (float16).
     """
-    if verify_lean:
-        print("=== Проверка математического сертификата Lean 4 (v2.0.0) ===")
-        print(verify_with_lean4_engine().strip())
+    state_dict = load_file(input_path)
+    out_tensors: Dict[str, torch.Tensor] = {}
+    quantizer = VCoreTernaryQuantizer(group_size=group_size, theta=theta)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    quantizer = VCoreTernaryQuantizer(group_size=group_size, theta=theta).to(device)
+    skip_keywords = ("norm", "bias", "embed", "lm_head")
+    quantized_layers = 0
+    total_l1_orig = 0.0
+    total_l1_err = 0.0
 
-    weights = {}
-    processed_layers, skipped_layers = 0, 0
-    total_orig_l1, total_err_l1 = 0.0, 0.0
+    for name, tensor in state_dict.items():
+        is_linear_weight = (
+            tensor.ndim == 2
+            and tensor.numel() % group_size == 0
+            and not any(kw in name.lower() for kw in skip_keywords)
+        )
 
-    print(f"\nОткрытие файла весов: {input_path} (Устройство: {device.upper()})")
-    with safe_open(input_path, framework="pt", device="cpu") as f:
-        for key in f.keys():
-            tensor = f.get_tensor(key)
+        if is_linear_weight:
+            w_f32 = tensor.to(torch.float32)
+            w_quant, mask, scales = quantizer.quantize(w_f32)
 
-            # Топологический фильтр линейных матриц (исключаем norm, embed, bias)
-            is_linear_weight = (
-                any(p in key.lower() for p in ["proj", "weight"])
-                and not any(n in key.lower() for n in ["norm", "embed", "bias"])
-            )
+            total_l1_orig += torch.sum(torch.abs(w_f32)).item()
+            total_l1_err += torch.sum(torch.abs(w_f32 - w_quant)).item()
 
-            if is_linear_weight and tensor.ndim == 2 and tensor.numel() % group_size == 0:
-                if "lm_head" in key.lower():
-                    print(f"[Изоляция] Слой {key} оставлен без сжатия для сохранения точности логитов.")
-                    weights[key] = tensor
-                    skipped_layers += 1
-                    continue
+            packed_bytes, orig_shape = pack_ternary_to_uint8(mask)
+            out_tensors[f"{name}.vcore_packed"] = packed_bytes.cpu()
+            out_tensors[f"{name}.vcore_scales"] = scales.to(torch.float16).cpu()
+            out_tensors[f"{name}.vcore_shape"] = torch.tensor(orig_shape, dtype=torch.int64)
+            quantized_layers += 1
+        else:
+            # Служебные слои оставляем в исходном формате
+            out_tensors[name] = tensor.cpu()
 
-                t_dev = tensor.to(device=device, dtype=torch.float32)
-                w_quant, _, _ = quantizer.quantize(t_dev)
+    save_file(out_tensors, output_path)
 
-                layer_orig = torch.sum(torch.abs(t_dev)).item()
-                layer_err = torch.sum(torch.abs(t_dev - w_quant)).item()
-                total_orig_l1 += layer_orig
-                total_err_l1 += layer_err
+    orig_mb = os.path.getsize(input_path) / (1024 * 1024)
+    new_mb = os.path.getsize(output_path) / (1024 * 1024)
 
-                print(f"[Квантован Δ=1] {key} | Форма: {list(tensor.shape)} | L1-ошибка: {layer_err:.2f}")
-                weights[key] = w_quant.to(device="cpu", dtype=tensor.dtype)
-                processed_layers += 1
-            else:
-                weights[key] = tensor
-                skipped_layers += 1
-
-    save_file(weights, output_path)
-    print(f"\n[УСПЕХ] Сжатая модель сохранена в: {output_path}")
-    print(f"Итог: квантовано слоёв = {processed_layers}, сохранено без изменений = {skipped_layers}")
-    if total_orig_l1 > 0:
-        rel_err = (total_err_l1 / total_orig_l1) * 100.0
-        print(f"Суммарная L1-норма: {total_orig_l1:.2f} | Ошибка квантования: {total_err_l1:.2f} ({rel_err:.2f}%)")
-
-
-if __name__ == "__main__":
-    in_file, out_file = "model.safetensors", "model_vcore_1_58bit.safetensors"
-    if os.path.exists(in_file):
-        quantize_safetensors_model(in_file, out_file, group_size=32, theta=1e-4)
-    else:
-        print(f"Файл {in_file} не найден. Поместите чекпоинт Hugging Face в текущую папку.")
+    return {
+        "quantized_layers": quantized_layers,
+        "orig_size_mb": orig_mb,
+        "packed_size_mb": new_mb,
+        "compression_ratio": orig_mb / max(new_mb, 1e-6),
+        "total_l1_orig": total_l1_orig,
+        "total_l1_err": total_l1_err,
+    }
+    
