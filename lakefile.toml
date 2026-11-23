@@ -1,6 +1,11 @@
 name = "VCoreL1Certified"
 version = "0.1.0"
+keywords = ["math", "lean4", "cuda", "quantization", "verified-solver", "banach-spaces"]
 defaultTargets = ["vcore_certifier"]
+
+[leanOptions]
+pp.unicode.fun = true
+autoImplicit = false
 
 [[require]]
 name = "MarkovL1Complexity"
