@@ -12,10 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: leanprover/lean-action@v1
-        with:
-          build: false
-          lake-manifest: false
+      - name: Install Elan & Lean 4
+        run: |
+          curl https://githubusercontent.com -sSf | sh -s -- -y --default-toolchain leanprover/lean4:v4.37.0-rc1
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
       - name: Build Linked Lean 4 Certifier
         run: |
