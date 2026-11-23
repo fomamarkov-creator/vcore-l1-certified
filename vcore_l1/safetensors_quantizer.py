@@ -5,7 +5,8 @@ import glob
 import json
 import os
 import shutil
-from typing import Dict, Tuple
+import tempfile
+from typing import Dict, List, Optional, Tuple
 import torch
 from safetensors.torch import load_file, save_file
 from .cuda_quantizer import VCoreTernaryQuantizer
@@ -57,7 +58,39 @@ def _pad_to_group(flat: torch.Tensor, group_size: int) -> Tuple[torch.Tensor, in
     return padded, orig_numel
 
 
-def repack_safetensors_layerwise(
+def _quantize_tensor_cascade(
+    w_f32: torch.Tensor,
+    cascade_groups: List[int],
+    theta: float,
+    max_rel_error: float,
+    auto_theta: bool,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor, int, float]]:
+    """
+    Каскадный подбор размера блока (например, 64 -> 32 -> 16):
+    пробует сжать слой с крупным блоком; если относительная L1-ошибка выше порога,
+    автоматически уменьшает размер блока, прежде чем делать откат в FP16.
+    """
+    orig_l1 = torch.sum(torch.abs(w_f32)).item()
+    flat = w_f32.reshape(-1)
+
+    for g in cascade_groups:
+        eff_g = min(g, flat.numel())
+        if eff_g <= 0:
+            continue
+        padded_flat, orig_numel = _pad_to_group(flat, eff_g)
+        q = VCoreTernaryQuantizer(group_size=eff_g, theta=theta, auto_theta=auto_theta)
+        w_q_pad, mask_pad, scales = q.quantize(padded_flat)
+
+        w_q = w_q_pad[:orig_numel].reshape(w_f32.shape)
+        mask = mask_pad[:orig_numel].reshape(w_f32.shape)
+        err = torch.sum(torch.abs(w_f32 - w_q)).item()
+        rel_err = err / (orig_l1 + 1e-8)
+
+        if rel_err <= max_rel_error:
+            return mask, scales, eff_g, err
+
+    return None
+    def repack_safetensors_layerwise(
     input_path: str,
     output_path: str,
     group_size: int = 32,
@@ -65,14 +98,20 @@ def repack_safetensors_layerwise(
     max_rel_error: float = 0.40,
     include_aux_layers: bool = True,
     auto_theta: bool = True,
+    cascade: bool = True,
 ) -> Dict[str, float]:
     """
     Адаптивная послойная переупаковка одного .safetensors файла в 1.58-bit формат V-CORE
-    с автоподбором порога theta_b* на каждом блоке и автоматическим откатом (rollback)
-    в FP16 при превышении допустимой относительной L1-ошибки max_rel_error.
+    с каскадным подбором размера блока (group_size -> 32 -> 16) и автоматическим
+    откатом в FP16, если ошибка всё равно превышает max_rel_error.
     """
     state_dict = load_file(input_path)
     out_tensors: Dict[str, torch.Tensor] = {}
+
+    if cascade:
+        cascade_groups = sorted(list({g for g in [group_size, 32, 16] if g <= group_size}), reverse=True)
+    else:
+        cascade_groups = [group_size]
 
     quantized_layers = 0
     rolled_back_layers = 0
@@ -89,28 +128,23 @@ def repack_safetensors_layerwise(
             continue
 
         w_f32 = tensor.to(torch.float32)
-        orig_l1 = torch.sum(torch.abs(w_f32)).item()
+        total_l1_orig += torch.sum(torch.abs(w_f32)).item()
 
-        eff_group = min(group_size, w_f32.numel())
-        padded_flat, orig_numel = _pad_to_group(w_f32.reshape(-1), eff_group)
+        res = _quantize_tensor_cascade(
+            w_f32=w_f32,
+            cascade_groups=cascade_groups,
+            theta=theta,
+            max_rel_error=max_rel_error,
+            auto_theta=auto_theta,
+        )
 
-        local_q = VCoreTernaryQuantizer(group_size=eff_group, theta=theta, auto_theta=auto_theta)
-        w_quant_pad, mask_pad, scales = local_q.quantize(padded_flat)
-
-        w_quant = w_quant_pad[:orig_numel].reshape(tensor.shape)
-        mask = mask_pad[:orig_numel].reshape(tensor.shape)
-
-        layer_err = torch.sum(torch.abs(w_f32 - w_quant)).item()
-        rel_err = layer_err / (orig_l1 + 1e-8)
-
-        total_l1_orig += orig_l1
-
-        if rel_err <= max_rel_error:
+        if res is not None:
+            mask, scales, chosen_g, layer_err = res
             packed_bytes, orig_shape = pack_ternary_to_uint8(mask)
             out_tensors[f"{name}.vcore_packed"] = packed_bytes.cpu()
             out_tensors[f"{name}.vcore_scales"] = scales.to(torch.float16).cpu()
             out_tensors[f"{name}.vcore_shape"] = torch.tensor(orig_shape, dtype=torch.int64)
-            out_tensors[f"{name}.vcore_group"] = torch.tensor([eff_group], dtype=torch.int64)
+            out_tensors[f"{name}.vcore_group"] = torch.tensor([chosen_g], dtype=torch.int64)
             quantized_layers += 1
             total_l1_err += layer_err
         else:
@@ -142,12 +176,9 @@ def repack_sharded_model(
     max_rel_error: float = 0.40,
     include_aux_layers: bool = True,
     auto_theta: bool = True,
+    cascade: bool = True,
 ) -> Dict[str, float]:
-    """
-    Послойная переупаковка целой папки модели Hugging Face (включая шардированные
-    чекпоинты model-00001-of-0000N.safetensors + обновление model.safetensors.index.json
-    и копирование tokenizer/config.json).
-    """
+    """Послойная переупаковка шардированной папки модели с обновлением index.json."""
     os.makedirs(output_dir, exist_ok=True)
     shard_files = sorted(glob.glob(os.path.join(input_dir, "*.safetensors")))
     if not shard_files:
@@ -162,7 +193,6 @@ def repack_sharded_model(
         "total_l1_orig": 0.0,
         "total_l1_err": 0.0,
     }
-
     new_weight_map: Dict[str, str] = {}
 
     for shard_path in shard_files:
@@ -176,20 +206,14 @@ def repack_sharded_model(
             max_rel_error=max_rel_error,
             include_aux_layers=include_aux_layers,
             auto_theta=auto_theta,
+            cascade=cascade,
         )
-        agg["quantized_layers"] += st["quantized_layers"]
-        agg["rolled_back_layers"] += st["rolled_back_layers"]
-        agg["orig_size_mb"] += st["orig_size_mb"]
-        agg["packed_size_mb"] += st["packed_size_mb"]
-        agg["total_l1_orig"] += st["total_l1_orig"]
-        agg["total_l1_err"] += st["total_l1_err"]
+        for k in ("quantized_layers", "rolled_back_layers", "orig_size_mb", "packed_size_mb", "total_l1_orig", "total_l1_err"):
+            agg[k] += st[k]
 
-        # Обновляем карту весов для индексного файла Hugging Face
-        saved_keys = load_file(out_shard).keys()
-        for k in saved_keys:
+        for k in load_file(out_shard).keys():
             new_weight_map[k] = fname
 
-    # Копируем конфигурационные файлы и токенизатор, обновляем index.json
     for item in os.listdir(input_dir):
         src_item = os.path.join(input_dir, item)
         dst_item = os.path.join(output_dir, item)
@@ -197,7 +221,7 @@ def repack_sharded_model(
             with open(src_item, "r", encoding="utf-8") as f:
                 idx_data = json.load(f)
             idx_data["weight_map"] = new_weight_map
-            idx_data.setdefault("metadata", {})["vcore_quantized"] = "1.58-bit-delta1"
+            idx_data.setdefault("metadata", {})["vcore_quantized"] = "1.58-bit-delta1-cascade"
             with open(dst_item, "w", encoding="utf-8") as f:
                 json.dump(idx_data, f, indent=2)
         elif not item.endswith(".safetensors") and os.path.isfile(src_item):
@@ -205,4 +229,75 @@ def repack_sharded_model(
 
     agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
     return agg
-    
+
+
+def repack_hf_hub_model(
+    repo_id: str,
+    output_dir: str,
+    group_size: int = 32,
+    theta: float = 1e-4,
+    max_rel_error: float = 0.40,
+    token: Optional[str] = None,
+) -> Dict[str, float]:
+    """
+    Потоковое сжатие модели напрямую с Hugging Face Hub по одному шарду за раз
+    (экономит до 80% дискового пространства: скачал шард -> сжал -> удалил исходник).
+    """
+    from huggingface_hub import HfApi, hf_hub_download
+
+    os.makedirs(output_dir, exist_ok=True)
+    api = HfApi(token=token)
+    repo_files = api.list_repo_files(repo_id=repo_id)
+
+    shard_names = sorted([f for f in repo_files if f.endswith(".safetensors")])
+    if not shard_names:
+        raise FileNotFoundError(f"В репозитории {repo_id} нет файлов .safetensors")
+
+    agg = {
+        "shards_processed": len(shard_names),
+        "quantized_layers": 0,
+        "rolled_back_layers": 0,
+        "orig_size_mb": 0.0,
+        "packed_size_mb": 0.0,
+        "total_l1_orig": 0.0,
+        "total_l1_err": 0.0,
+    }
+    new_weight_map: Dict[str, str] = {}
+
+    with tempfile.TemporaryDirectory() as tmp_dl:
+        for fname in repo_files:
+            if not fname.endswith(".safetensors") and "/" not in fname:
+                local_cfg = hf_hub_download(repo_id=repo_id, filename=fname, local_dir=tmp_dl, token=token)
+                if fname != "model.safetensors.index.json":
+                    shutil.copy2(local_cfg, os.path.join(output_dir, fname))
+
+        for s_name in shard_names:
+            local_shard = hf_hub_download(repo_id=repo_id, filename=s_name, local_dir=tmp_dl, token=token)
+            out_shard = os.path.join(output_dir, os.path.basename(s_name))
+            st = repack_safetensors_layerwise(
+                local_shard,
+                out_shard,
+                group_size=group_size,
+                theta=theta,
+                max_rel_error=max_rel_error,
+            )
+            for k in ("quantized_layers", "rolled_back_layers", "orig_size_mb", "packed_size_mb", "total_l1_orig", "total_l1_err"):
+                agg[k] += st[k]
+
+            for k in load_file(out_shard).keys():
+                new_weight_map[k] = os.path.basename(s_name)
+
+            if os.path.exists(local_shard):
+                os.remove(local_shard)
+
+        idx_src = os.path.join(tmp_dl, "model.safetensors.index.json")
+        if os.path.exists(idx_src):
+            with open(idx_src, "r", encoding="utf-8") as f:
+                idx_data = json.load(f)
+            idx_data["weight_map"] = new_weight_map
+            idx_data.setdefault("metadata", {})["vcore_quantized"] = "1.58-bit-delta1-cascade"
+            with open(os.path.join(output_dir, "model.safetensors.index.json"), "w", encoding="utf-8") as f:
+                json.dump(idx_data, f, indent=2)
+
+    agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
+    return agg
