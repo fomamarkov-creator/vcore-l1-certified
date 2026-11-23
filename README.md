@@ -1,10 +1,10 @@
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
-**Lean Core:** `l1-projection-complexity-lean4` (`v2.0.0`) | **Toolchain:** Lean `v4.37.0-rc1` | **Backend:** PyTorch / CUDA (`sm_70`–`sm_90`) | **License:** AGPL-3.0
+**Lean Core:** `l1-projection-complexity-lean4` (`MarkovL1TernaryQuantizer`) | **Toolchain:** Lean `v4.37.0-rc1` | **Backend:** PyTorch / CUDA (`sm_70`–`sm_90`) | **License:** AGPL-3.0
 
 # V-CORE \(\ell_1\)-Certified: Hybrid Lean 4 + GPU 1.58-Bit & INT4 Quantization & Inference Engine
 
-A complete symbolic-numeric compression and inference runtime combining a **machine-checked Lean 4 formal verification core** (`l1-projection-complexity-lean4`, release `v2.0.0`) with **channel-outlier permutation**, **per-block adaptive \(\theta_b^*\) noise pruning**, **multi-stage precision cascade (`1.58-bit -> INT4 -> FP16`) with Auto-Rollback**, **2-bit KV-cache compression**, and **Fused `uint32` / `__shared__` CUDA kernels** (`libvcore_engine.so`).
+A complete symbolic-numeric compression and inference runtime combining a **machine-checked Lean 4 formal verification core** (`l1-projection-complexity-lean4`, including the exact critical-threshold 1.58-bit ternary solver `MarkovL1TernaryQuantizer`) with **channel-outlier permutation**, **multi-stage precision cascade (`1.58-bit -> INT4 -> FP16`) with Auto-Rollback**, **2-bit KV-cache compression**, and **Fused `uint32` / `__shared__` CUDA kernels** (`libvcore_engine.so`).
 
 * **Author:** E. S. Markov (ORCID: `0009-0005-2235-5464`)
 * **Affiliation:** Independent Researcher, Astrakhan, Russia
@@ -15,12 +15,13 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 ## Full Stack Capabilities
 
 1. **Formal Lean 4 Verification (`CertifierMain.lean` \(\to\) `vcore_certifier`):**
-   * Links directly against `MarkovL1Complexity`, `MarkovL1Solver`, `MarkovL1WeightedSolver`, and `MarkovL1Quantizer` (`v2.0.0`) to certify global \(\ell_1\)-optimality over exact rationals \(\mathbb{Q}\) without `Classical.choice`.
-2. **Channel Outlier Grouping & Adaptive \(\theta_b^*\) Pruning (`vcore_l1/cuda_quantizer.py`):**
-   * Sorts weight columns by \(\ell_1\)-norm (`vcore_perm`) to isolate heavy-tailed outliers into dedicated \(\Delta = 1\) blocks, then selects the optimal pruning threshold \(\theta_b^*\) and median scale \(\alpha_b^*\) per block.
+   * Links directly against `MarkovL1Complexity`, `MarkovL1Solver`, `MarkovL1WeightedSolver`, `MarkovL1Quantizer`, and `MarkovL1TernaryQuantizer` to certify global \(\ell_1\)-optimality over exact rationals \(\mathbb{Q}\) without `Classical.choice`.
+2. **Exact Critical-Threshold 1.58-Bit Search & Channel Outlier Grouping (`vcore_l1/`):**
+   * Sorts weight columns by \(\ell_1\)-norm (`vcore_perm`) to isolate heavy-tailed outliers into dedicated \(\Delta = 1\) blocks.
+   * Implements `quantize_ternary_exact_critical` (derived from `MarkovL1TernaryQuantizer.lean`), searching over all critical order-statistic thresholds \(\{0\} \cup \{\vert{}w_i\vert{}\}\) per block to find the exact global \(\ell_1\)-optimal pair \((\theta_b^*, \alpha_b^*)\).
 3. **Multi-Stage Precision Cascade & VRAM Budgeter (`vcore_l1/safetensors_quantizer.py`, `vcore-pack`):**
    * Automatically steps down block sizes (`64 -> 32 -> 16` in 1.58-bit), falls back to **4-bit INT4** (`{-7..+7}`), and rolls back sensitive 1D layers (`LayerNorm`, `bias`) to `FP16` under `--max-rel-error` or `--target-vram-gb`.
-   * Supports local `.safetensors`, sharded directories (`model.safetensors.index.json`), and **streaming Hugging Face Hub compression** (`--hf-repo`, deleting raw shards on the fly to save up to 80% disk space).
+   * Supports local `.safetensors`, sharded directories (`model.safetensors.index.json`), and **streaming Hugging Face Hub compression** (`--hf-repo`).
 4. **One-Line Model Loader, KV-Cache Compression & Fused CUDA (`vcore_l1/inference_layer.py`, `cuda/`):**
    * Loads compressed models in one line via `VCoreModelForCausalLM.from_vcore_pretrained(...)`.
    * Compresses autoregressive context memory on the fly via `VCoreDynamicCache`.
