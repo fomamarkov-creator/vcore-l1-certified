@@ -21,10 +21,10 @@ def absmean_bitnet_quantize(weights: torch.Tensor) -> torch.Tensor:
 
 
 def main():
-    print("=== 1. Проверка математического ядра Lean 4 (v2.1.0) ===")
+    print("=== 1. Проверка математического ядра Lean 4 (v3.0.0 — 8 модулей) ===")
     print(verify_with_lean4_engine().strip())
 
-    print("\n=== 2. Сравнение с BitNet (absmean) при автоподборе theta_b* ===")
+    print("\n=== 2. Сравнение с BitNet (absmean) и тест Activation-Weighted L1 ===")
     torch.manual_seed(42)
     weights = torch.randn(128, 256) * 0.05
     weights[torch.rand_like(weights) < 0.005] *= 40.0
@@ -34,6 +34,13 @@ def main():
     w_vcore, _, _ = q.quantize(weights)
     err_vcore = torch.sum(torch.abs(weights - w_vcore)).item()
     assert err_vcore < err_bitnet
+
+    act_imp = torch.ones(256)
+    act_imp[:16] = 25.0
+    w_weighted, _, _ = q.quantize(weights, activation_scales=act_imp)
+    weighted_err_unweighted = torch.sum(act_imp.view(1, -1) * torch.abs(weights - w_vcore)).item()
+    weighted_err_aware = torch.sum(act_imp.view(1, -1) * torch.abs(weights - w_weighted)).item()
+    assert weighted_err_aware <= weighted_err_unweighted
 
     print("\n=== 3. Тест каскада (1.58-bit -> INT4 -> FP16), VCoreDynamicCache и VRAM Budget ===")
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -78,9 +85,9 @@ def main():
     assert k_cat.shape == (1, 4, 9, 64) and cache.get_seq_length() == 9
 
     subprocess.run(["vcore-bench", "--hidden-size", "256", "--out-size", "256", "--steps", "10"], check=True)
-    print("[OK] Все компоненты (Lean 4, 1.58-bit, INT4 Cascade, VCoreDynamicCache, VRAM Budget) работают!")
+    print("[OK] Все компоненты (Lean 4 v3.0.0, Activation-Weighted L1, Warp CUDA, Cascade, KV-Cache) работают!")
 
 
 if __name__ == "__main__":
     main()
-    
+                
