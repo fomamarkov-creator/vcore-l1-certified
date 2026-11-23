@@ -19,3 +19,6 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda = ["cupy-cuda12x>=12.0.0"]
+
+[project.scripts]
+vcore-pack = "vcore_l1.cli:main"
