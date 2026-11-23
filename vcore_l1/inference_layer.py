@@ -124,8 +124,8 @@ class VCoreDynamicCache:
     def get_max_cache_shape(self) -> Optional[int]:
         return None
 
-    def get_mask_sizes(self, cache_position: torch.Tensor, layer_idx: int) -> Tuple[int, int]:
-        query_length = cache_position.shape
+    def get_mask_sizes(self, cache_position: Any, layer_idx: int) -> Tuple[int, int]:
+        query_length = cache_position if isinstance(cache_position, int) else int(cache_position.shape[0])
         kv_length = self.get_seq_length(layer_idx) + query_length
         return kv_length, 0
 
