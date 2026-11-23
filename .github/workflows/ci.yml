@@ -1,4 +1,51 @@
-name: CI
+name: CIname: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  lean-and-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: printf '{"version":"1.1.0","packagesDir":".lake/packages","packages":[]}\n' > lake-manifest.json
+      - uses: leanprover/lean-action@v1
+        with:
+          build: false
+      - run: |
+          lake update
+          lake exe cache get
+          lake build
+          lake exe vcore_certifier --verify-bench
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install numpy safetensors torch
+          pip install -e . --no-deps
+          python test_quantizer.py
+
+  cuda-build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.1.0"
+          method: "network"
+      - run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89"
+          cmake --build build --config Release -j $(nproc)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libvcore_engine
+          path: build/libvcore_engine.so
+
 
 on:
   push:
