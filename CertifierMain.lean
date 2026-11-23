@@ -25,7 +25,7 @@ def main (args : List String) : IO Unit := do
       let wEntries : List WeightedEntryQ := [⟨1/10, 1⟩, ⟨-1/10, 1⟩, ⟨4, 10⟩, ⟨-4, 10⟩, ⟨20, 1⟩]
       let (wθ, wα) := quantizeWeightedTernaryExactQ wEntries
       IO.println s!"[V-CORE Activation-Weighted 1.58-Bit] theta*={wθ} | alpha*={wα} (certified_optimal=true)"
-      let fptCost := solveChainOverlapFPT [-4, 0, 4]
+      let fptCost := solveChainOverlapFPT [-4, 0, 4] [4, 0, 4, 0]
       IO.println s!"[V-CORE Bounded-Treewidth (Δ=2) FPT] min_L1_cost={fptCost} (certified_dp=true)"
   | _ =>
       IO.println "V-CORE Certified Lean 4 Bridge (linked to l1-projection-complexity-lean4 v3.0.0)"
