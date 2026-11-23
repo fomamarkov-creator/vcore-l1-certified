@@ -1,4 +1,17 @@
 from .cuda_quantizer import VCoreTernaryQuantizer, verify_with_lean4_engine
+from .matrix_generator import generate_markov_q
+from .safetensors_quantizer import (
+    pack_ternary_to_uint8,
+    unpack_uint8_to_ternary,
+    repack_safetensors_layerwise,
+)
 
 __version__ = "0.1.0"
-__all__ = ["VCoreTernaryQuantizer", "verify_with_lean4_engine"]
+__all__ = [
+    "VCoreTernaryQuantizer",
+    "verify_with_lean4_engine",
+    "generate_markov_q",
+    "pack_ternary_to_uint8",
+    "unpack_uint8_to_ternary",
+    "repack_safetensors_layerwise",
+]
