@@ -240,7 +240,7 @@ class VCoreLinear(nn.Module):
         out = F.linear(x_2d.to(torch.float32), w_restored, bias_f32).to(x.dtype)
         return out.reshape(*orig_shape[:-1], self.out_features)
 
-    def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -> nn.Module:
+def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -> nn.Module:
     for full_name, module in list(model.named_modules()):
         if isinstance(module, nn.Linear):
             w_key = f"{full_name}.weight"
@@ -275,8 +275,7 @@ class VCoreLinear(nn.Module):
         model.tie_weights()
     return model
 
-
-    def load_vcore_causal_lm(model_dir: str, device: str = "cpu", dtype: torch.dtype = torch.float16):
+def load_vcore_causal_lm(model_dir: str, device: str = "cpu", dtype: torch.dtype = torch.float16):
     from transformers import AutoConfig, AutoModelForCausalLM
 
     config = AutoConfig.from_pretrained(model_dir)
