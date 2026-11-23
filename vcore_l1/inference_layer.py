@@ -4,13 +4,17 @@
 import ctypes
 import glob
 import os
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import load_file
 from .cuda_quantizer import VCoreTernaryQuantizer
-from .safetensors_quantizer import pack_ternary_to_uint8, unpack_uint8_to_ternary
+from .safetensors_quantizer import (
+    pack_ternary_to_uint8,
+    unpack_uint8_to_ternary,
+    unpack_uint8_to_int4,
+)
 
 
 def _load_cuda_lib() -> Optional[ctypes.CDLL]:
@@ -42,10 +46,7 @@ _CUDA_LIB = _load_cuda_lib()
 
 
 class VCoreKVCacheQuantizer:
-    """
-    Сжатие KV-кэша (Key/Value состояний трансформера) на лету в 2-битный формат
-    с оптимальными Δ=1 медианными масштабами (сокращает VRAM длинного контекста в ~6 раз).
-    """
+    """Сжатие KV-кэша на лету в 2-битный формат с Δ=1 медианными масштабами."""
     def __init__(self, group_size: int = 32, theta: float = 1e-4):
         self.group_size = group_size
         self.quantizer = VCoreTernaryQuantizer(group_size=group_size, theta=theta, auto_theta=True)
@@ -76,6 +77,43 @@ class VCoreKVCacheQuantizer:
         return restored[:total_elems].reshape(orig_shape).to(dtype)
 
 
+class VCoreDynamicCache:
+    """
+    Совместимый с Hugging Face transformers (past_key_values) кэш генерации,
+    сжимающий историю ключей и значений на лету по Δ=1 медиане.
+    """
+    def __init__(self, group_size: int = 32):
+        self.kv_q = VCoreKVCacheQuantizer(group_size=group_size)
+        self.key_cache: List[Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], torch.dtype]] = []
+        self.value_cache: List[Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], torch.dtype]] = []
+        self._seen_tokens = 0
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if layer_idx == 0:
+            self._seen_tokens += key_states.shape[-2]
+
+        if len(self.key_cache) <= layer_idx:
+            self.key_cache.append((*self.kv_q.compress_kv(key_states), key_states.dtype))
+            self.value_cache.append((*self.kv_q.compress_kv(value_states), value_states.dtype))
+            return key_states, value_states
+
+        k_prev = self.kv_q.decompress_kv(*self.key_cache[layer_idx])
+        v_prev = self.kv_q.decompress_kv(*self.value_cache[layer_idx])
+        k_full = torch.cat([k_prev, key_states], dim=-2)
+        v_full = torch.cat([v_prev, value_states], dim=-2)
+
+        self.key_cache[layer_idx] = (*self.kv_q.compress_kv(k_full), key_states.dtype)
+        self.value_cache[layer_idx] = (*self.kv_q.compress_kv(v_full), value_states.dtype)
+        return k_full, v_full
+
+    def get_seq_length(self, layer_idx: int = 0) -> int:
+        return self._seen_tokens
 class VCoreLinear(nn.Module):
     """Drop-in замена для nn.Linear (2-bit / 4-bit + Δ=1 перестановка каналов с выбросами)."""
     def __init__(
@@ -142,7 +180,7 @@ class VCoreLinear(nn.Module):
         x_2d = x.reshape(-1, self.in_features)
         if self.vcore_perm is not None:
             x_2d = x_2d[:, self.vcore_perm]
-        batch_tokens = x_2d.shape[0]
+        batch_tokens = x_2d.shape
 
         if (
             self.bits == 2
@@ -200,7 +238,7 @@ def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -
                 vcore_layer = VCoreLinear.from_packed_tensors(
                     packed=packed,
                     scales=scales,
-                    shape=(shape[0], shape[1]),
+                    shape=(shape, shape),
                     group_size=g_size,
                     bits=bits,
                     bias=bias_tensor,
@@ -218,10 +256,6 @@ def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -
 
 
 def load_vcore_causal_lm(model_dir: str, device: str = "cpu", dtype: torch.dtype = torch.float16):
-    """
-    Загрузчик в 1 строку для сжатых моделей Hugging Face (transformers):
-    создаёт архитектуру по config.json, подставляет VCoreLinear и переносит на device.
-    """
     from transformers import AutoConfig, AutoModelForCausalLM
 
     config = AutoConfig.from_pretrained(model_dir)
@@ -240,12 +274,8 @@ def load_vcore_causal_lm(model_dir: str, device: str = "cpu", dtype: torch.dtype
     model = inject_vcore_layers(model, merged_sd)
     return model.to(device=device, dtype=dtype).eval()
 
+
 class VCoreModelForCausalLM:
-    """
-    Удобная обёртка в стиле Hugging Face transformers:
-    позволяет загружать сжатую модель одной строкой
-    `model = VCoreModelForCausalLM.from_vcore_pretrained("./model_vcore_158bit", device="cuda")`
-    """
     @staticmethod
     def from_vcore_pretrained(
         model_dir: str,
