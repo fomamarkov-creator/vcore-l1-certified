@@ -39,10 +39,10 @@ jobs:
           cuda: "12.1.0"
           method: "network"
       - run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release -j $(nproc)
       - uses: actions/upload-artifact@v4
         with:
-          name: libvcore_engine
+          name: libvcore_engine-cuda12-all-gpus
           path: build/libvcore_engine.so
           
