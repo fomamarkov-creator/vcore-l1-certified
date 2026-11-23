@@ -2,9 +2,9 @@
  * Copyright (C) 2026 Efim Sergeevich Markov (ef.87@mail.ru)
  * Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
  *
- * V-CORE High-Throughput CUDA Kernels v2:
- * - 32-bit vectorized uint32 reads (16 ternary weights per memory transaction)
- * - Shared-memory (__shared__) input caching for GEMV/GEMM inference
+ * V-CORE High-Throughput CUDA Kernels v3:
+ * - Warp-parallel (32 threads/row) 32-bit uint32 vectorized GEMV with __shfl_down_sync
+ * - Batched GEMM kernel for long-context prefill
  */
 
 #include <cuda_runtime.h>
@@ -13,7 +13,7 @@
 
 #define EPS 1e-6f
 #define DEFAULT_ZETA 1.024f
-#define MAX_SHARED_IN 8192
+#define WARP_SIZE 32
 
 extern "C" __global__
 void vcore_optimize(const float* __restrict__ X,
@@ -35,40 +35,33 @@ void vcore_optimize(const float* __restrict__ X,
     }
 }
 
-// Ускоренное GEMV-ядро: кэширует вектор X в __shared__ памяти и читает по 16 весов (uint32)
+// Warp-параллельное GEMV-ядро: 1 варп (32 потока) на 1 строку матрицы весов
 extern "C" __global__
-void vcore_fused_ternary_gemv(const uint8_t* __restrict__ W_packed,
-                              const float* __restrict__ block_scales,
-                              const float* __restrict__ X,
-                              float* __restrict__ Y,
-                              int out_features,
-                              int in_features,
-                              int group_size) {
-    __shared__ float s_x[MAX_SHARED_IN];
-    if (in_features <= MAX_SHARED_IN) {
-        for (int idx = threadIdx.x; idx < in_features; idx += blockDim.x) {
-            s_x[idx] = X[idx];
-        }
-        __syncthreads();
-    }
-    const float* x_ptr = (in_features <= MAX_SHARED_IN) ? s_x : X;
+void vcore_fused_ternary_gemv_warp(const uint8_t* __restrict__ W_packed,
+                                   const float* __restrict__ block_scales,
+                                   const float* __restrict__ X,
+                                   float* __restrict__ Y,
+                                   int out_features,
+                                   int in_features,
+                                   int group_size) {
+    int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    int lane_id = threadIdx.x & (WARP_SIZE - 1);
+    if (warp_id >= out_features) return;
 
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= out_features) return;
-
-    float total_acc = 0.0f;
     int blocks_per_row = in_features / group_size;
     int bytes_per_row = in_features / 4;
-    int base_byte_offset = row * bytes_per_row;
-    int base_scale_offset = row * blocks_per_row;
+    int base_byte_offset = warp_id * bytes_per_row;
+    int base_scale_offset = warp_id * blocks_per_row;
 
-    for (int b = 0; b < blocks_per_row; ++b) {
+    float lane_acc = 0.0f;
+
+    // Каждый поток варпа берёт свой блок b, b+32, b+64...
+    for (int b = lane_id; b < blocks_per_row; b += WARP_SIZE) {
         float block_acc = 0.0f;
         int col_start = b * group_size;
         int byte_start = base_byte_offset + (col_start / 4);
         int num_bytes = group_size / 4;
 
-        // Быстрый 32-битный проход (по 4 байта = 16 тернарных весов за одну загрузку)
         int num_words = num_bytes / 4;
         const uint32_t* word_ptr = reinterpret_cast<const uint32_t*>(W_packed + byte_start);
         for (int w = 0; w < num_words; ++w) {
@@ -78,24 +71,30 @@ void vcore_fused_ternary_gemv(const uint8_t* __restrict__ W_packed,
             for (int k = 0; k < 16; ++k) {
                 int code = (packed32 >> (k * 2)) & 0x03;
                 float s = (float)(code - 1);
-                block_acc += s * x_ptr[c + k];
+                block_acc += s * X[c + k];
             }
         }
 
-        // Остаток, если group_size не кратен 16 (например, group_size = 16 кратен, но на всякий случай)
         for (int j = num_words * 4; j < num_bytes; ++j) {
             uint8_t packed = W_packed[byte_start + j];
             int c = col_start + j * 4;
-            block_acc += ((float)((int)(packed & 0x03) - 1)) * x_ptr[c]
-                       + ((float)((int)((packed >> 2) & 0x03) - 1)) * x_ptr[c + 1]
-                       + ((float)((int)((packed >> 4) & 0x03) - 1)) * x_ptr[c + 2]
-                       + ((float)((int)((packed >> 6) & 0x03) - 1)) * x_ptr[c + 3];
+            block_acc += ((float)((int)(packed & 0x03) - 1)) * X[c]
+                       + ((float)((int)((packed >> 2) & 0x03) - 1)) * X[c + 1]
+                       + ((float)((int)((packed >> 4) & 0x03) - 1)) * X[c + 2]
+                       + ((float)((int)((packed >> 6) & 0x03) - 1)) * X[c + 3];
         }
 
-        total_acc += block_acc * block_scales[base_scale_offset + b];
+        lane_acc += block_acc * block_scales[base_scale_offset + b];
     }
 
-    Y[row] = total_acc;
+    // Регистровая варп-редукция без использования shared memory
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        lane_acc += __shfl_down_sync(0xffffffff, lane_acc, offset);
+    }
+
+    if (lane_id == 0) {
+        Y[warp_id] = lane_acc;
+    }
 }
 
 // Пакетное GEMM-ядро для длинных промптов (prefill)
@@ -128,12 +127,10 @@ void vcore_fused_ternary_gemm(const uint8_t* __restrict__ W_packed,
         for (int j = 0; j < num_bytes; ++j) {
             uint8_t packed = W_packed[byte_start + j];
             int c = col_start + j * 4;
-
             float s0 = (float)((int)(packed & 0x03) - 1);
             float s1 = (float)((int)((packed >> 2) & 0x03) - 1);
             float s2 = (float)((int)((packed >> 4) & 0x03) - 1);
             float s3 = (float)((int)((packed >> 6) & 0x03) - 1);
-
             block_acc += s0 * x_row[c] + s1 * x_row[c + 1] + s2 * x_row[c + 2] + s3 * x_row[c + 3];
         }
         total_acc += block_acc * block_scales[base_scale_offset + b];
@@ -157,9 +154,10 @@ extern "C" void run_vcore_fused_gemm(const uint8_t* d_W_packed,
                                      int in_features,
                                      int group_size) {
     if (batch_tokens == 1) {
-        int blockSize = 256;
-        int gridSize = (out_features + blockSize - 1) / blockSize;
-        vcore_fused_ternary_gemv<<<gridSize, blockSize>>>(
+        int threadsPerBlock = 256; // 8 варпов по 32 потока на блок
+        int totalThreads = out_features * WARP_SIZE;
+        int gridSize = (totalThreads + threadsPerBlock - 1) / threadsPerBlock;
+        vcore_fused_ternary_gemv_warp<<<gridSize, threadsPerBlock>>>(
             d_W_packed, d_scales, d_X, d_Y, out_features, in_features, group_size
         );
     } else {
