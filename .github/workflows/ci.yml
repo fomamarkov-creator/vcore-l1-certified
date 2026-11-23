@@ -1,4 +1,4 @@
-name: CI
+name: V-CORE L1-Certified CI & CUDA Build
 
 on:
   push:
@@ -6,8 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build-and-test:
+  verify-lean-and-python:
+    name: Verify Lean 4 Core & Python Quantizer
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -37,4 +41,35 @@ jobs:
           pip install numpy safetensors torch --index-url https://pytorch.org
           pip install -e . --no-deps
           python test_quantizer.py
+
+  build-cuda-engine:
+    name: Build Native CUDA Library (libvcore_engine.so)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo apt-get clean
+
+      - name: Install CUDA Toolkit 12.1
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.1.0"
+          method: "network"
+
+      - name: Configure & Build libvcore_engine.so
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89"
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Upload Compiled CUDA Engine Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libvcore_engine-linux-cuda12
+          path: build/libvcore_engine.so
           
