@@ -5,19 +5,11 @@ import subprocess
 import torch
 import torch.nn as nn
 
-try:
-    import cupy as cp
-    from torch.utils.dlpack import to_dlpack
-    HAS_CUPY = True
-except ImportError:
-    HAS_CUPY = False
-
 
 class VCoreTernaryQuantizer(nn.Module):
     """
     Улучшенный гибридный 1.58-bit квантователь {-1, 0, +1}:
-    1. Автоматический подбор оптимального порога шума theta_b* для КАЖДОГО блока
-       (сравнение кандидатов {0, 0.25*med, 0.5*med} по минимуму L1-ошибки).
+    1. Автоматический подбор оптимального порога шума theta_b* для КАЖДОГО блока.
     2. Оптимальное Δ = 1 медианное масштабирование ненулевых весов блока.
     """
     def __init__(self, group_size: int = 32, theta: float = 1e-4, auto_theta: bool = True):
@@ -33,6 +25,7 @@ class VCoreTernaryQuantizer(nn.Module):
             raise ValueError(f"Число элементов ({weights.numel()}) должно делиться на group_size={self.group_size}")
 
         blocks = weights.reshape(-1, self.group_size)
+        num_blocks = blocks.shape[0]
         abs_blocks = torch.abs(blocks)
         base_med = torch.median(abs_blocks, dim=1, keepdim=True).values
 
@@ -43,14 +36,13 @@ class VCoreTernaryQuantizer(nn.Module):
             w_quant = (mask * scales).reshape(orig_shape)
             return w_quant, mask.reshape(orig_shape), scales.reshape(-1)
 
-        # Автоподбор оптимального порога theta_b* для каждого блока по минимуму L1-ошибки
         candidates = [
             torch.full_like(base_med, self.theta),
             0.25 * base_med,
             0.50 * base_med,
         ]
 
-        best_err = torch.full((blocks.shape[0],), float("inf"), device=blocks.device, dtype=blocks.dtype)
+        best_err = torch.full((num_blocks,), float("inf"), device=blocks.device, dtype=blocks.dtype)
         best_mask = torch.zeros_like(blocks)
         best_scales = torch.zeros_like(base_med)
 
@@ -59,7 +51,6 @@ class VCoreTernaryQuantizer(nn.Module):
             pruned = torch.where(active, blocks, torch.zeros_like(blocks))
             mask = torch.sign(pruned)
 
-            # Медиана по активным (ненулевым) элементам блока
             masked_abs = torch.where(active, abs_blocks, torch.tensor(float("nan"), device=blocks.device, dtype=blocks.dtype))
             scales = torch.nanmedian(masked_abs, dim=1, keepdim=True).values
             scales = torch.nan_to_num(scales, nan=0.0)
