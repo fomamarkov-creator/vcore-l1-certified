@@ -22,7 +22,6 @@ class VCoreTernaryQuantizer(nn.Module):
         blocks = weights.reshape(-1, self.group_size)
         num_blocks = blocks.size(0)
         abs_blocks = torch.abs(blocks)
-        base_med = torch.median(abs_blocks, dim=1, keepdim=True).values
 
         if not self.auto_theta:
             pruned = torch.where(abs_blocks > self.theta, blocks, torch.zeros_like(blocks))
@@ -31,24 +30,22 @@ class VCoreTernaryQuantizer(nn.Module):
             w_quant = (mask * scales).reshape(orig_shape)
             return w_quant, mask.reshape(orig_shape), scales.reshape(-1)
 
-        candidates = [
-            torch.full_like(base_med, self.theta),
-            0.25 * base_med,
-            0.50 * base_med,
-        ]
-
+        # Точный перебор критических порогов из MarkovL1TernaryQuantizer.lean
+        sorted_abs, _ = torch.sort(abs_blocks, dim=1)
         best_err = torch.full((num_blocks,), float("inf"), device=blocks.device, dtype=blocks.dtype)
         best_mask = torch.zeros_like(blocks)
-        best_scales = torch.zeros_like(base_med)
+        best_scales = torch.zeros((num_blocks, 1), device=blocks.device, dtype=blocks.dtype)
 
-        for th in candidates:
+        for k in range(self.group_size):
+            if k == 0:
+                th = torch.zeros((num_blocks, 1), device=blocks.device, dtype=blocks.dtype)
+            else:
+                th = sorted_abs.narrow(1, k - 1, 1)
+
             active = abs_blocks > th
-            pruned = torch.where(active, blocks, torch.zeros_like(blocks))
-            mask = torch.sign(pruned)
-
+            mask = torch.where(active, torch.sign(blocks), torch.zeros_like(blocks))
             masked_abs = torch.where(active, abs_blocks, torch.tensor(float("nan"), device=blocks.device, dtype=blocks.dtype))
-            scales = torch.nanmedian(masked_abs, dim=1, keepdim=True).values
-            scales = torch.nan_to_num(scales, nan=0.0)
+            scales = torch.nan_to_num(torch.nanmedian(masked_abs, dim=1, keepdim=True).values, nan=0.0)
 
             w_cand = mask * scales
             err = torch.sum(torch.abs(blocks - w_cand), dim=1)
