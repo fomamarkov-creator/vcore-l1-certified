@@ -123,4 +123,552 @@ def _quantize_tensor_cascade(
             return q_int4, scales4, eff_g4, 4, err4
 
     return None
-    
+
+def _estimate_threshold_for_vram(
+    state_dict: Dict[str, torch.Tensor],
+    target_vram_gb: float,
+    group_size: int,
+    theta: float,
+    auto_theta: bool,
+) -> float:
+    """Подбирает max_rel_error так, чтобы сжатая модель уложилась в target_vram_gb."""
+    target_bytes = target_vram_gb * (1024 ** 3)
+    total_fp16_bytes = sum(t.numel() * 2 for t in state_dict.values())
+    if total_fp16_bytes <= target_bytes:
+        return 0.35
+
+    layer_profiles = []
+    fixed_bytes = 0
+    for name, t in state_dict.items():
+        if not t.is_floating_point() or t.ndim < 2 or t.numel() < 64:
+            fixed_bytes += t.numel() * t.element_size()
+            continue
+        w_f32 = t.to(torch.float32)
+        orig_l1 = torch.sum(torch.abs(w_f32)).item()
+        eff_g = min(group_size, w_f32.numel())
+        padded, orig_n = _pad_to_group(w_f32.reshape(-1), eff_g)
+        q = VCoreTernaryQuantizer(group_size=eff_g, theta=theta, auto_theta=auto_theta)
+        w_q, _, _ = q.quantize(padded)
+        rel_err = torch.sum(torch.abs(w_f32 - w_q[:orig_n].reshape(t.shape))).item() / (orig_l1 + 1e-8)
+        fp_b = t.numel() * 2
+        q2_b = (t.numel() + 3) // 4 + ((t.numel() + eff_g - 1) // eff_g) * 2
+        layer_profiles.append((rel_err, fp_b, q2_b))
+
+    layer_profiles.sort(key=lambda x: x)
+    cur_bytes = fixed_bytes + sum(x[1] for x in layer_profiles)
+    chosen_thresh = 0.40
+    for rel_err, fp_b, q2_b in layer_profiles:
+        if cur_bytes <= target_bytes:
+            break
+        cur_bytes -= (fp_b - q2_b)
+        chosen_thresh = max(chosen_thresh, rel_err + 1e-4)
+    return min(chosen_thresh, 0.95)
+
+
+def repack_safetensors_layerwise(
+    input_path: str,
+    output_path: str,
+    group_size: int = 32,
+    theta: float = 1e-4,
+    max_rel_error: float = 0.40,
+    include_aux_layers: bool = True,
+    auto_theta: bool = True,
+    cascade: bool = True,
+    target_vram_gb: Optional[float] = None,
+) -> Dict[str, float]:
+    state_dict = load_file(input_path)
+    if target_vram_gb is not None and target_vram_gb > 0:
+        max_rel_error = _estimate_threshold_for_vram(
+            state_dict, target_vram_gb, group_size, theta, auto_theta
+        )
+
+    out_tensors: Dict[str, torch.Tensor] = {}
+    cascade_groups = (
+        sorted(list({g for g in [group_size, 32, 16] if g <= group_size}), reverse=True)
+        if cascade else [group_size]
+    )
+
+    q2_layers = 0
+    q4_layers = 0
+    rolled_back_layers = 0
+    total_l1_orig = 0.0
+    total_l1_err = 0.0
+
+    for name, tensor in state_dict.items():
+        if not tensor.is_floating_point() or tensor.numel() == 0:
+            out_tensors[name] = tensor.cpu()
+            continue
+        if not include_aux_layers and tensor.ndim < 2:
+            out_tensors[name] = tensor.cpu()
+            continue
+
+        w_f32 = tensor.to(torch.float32)
+        total_l1_orig += torch.sum(torch.abs(w_f32)).item()
+
+        res = _quantize_tensor_cascade(
+            w_f32=w_f32,
+            cascade_groups=cascade_groups,
+            theta=theta,
+            max_rel_error=max_rel_error,
+            auto_theta=auto_theta,
+            allow_int4=cascade,
+        )
+
+        if res is not None:
+            grid, scales, chosen_g, bits, layer_err = res
+            if bits == 2:
+                packed_bytes, orig_shape = pack_ternary_to_uint8(grid)
+                q2_layers += 1
+            else:
+                packed_bytes, orig_shape = pack_int4_to_uint8(grid)
+                q4_layers += 1
+
+            out_tensors[f"{name}.vcore_packed"] = packed_bytes.cpu()
+            out_tensors[f"{name}.vcore_scales"] = scales.to(torch.float16).cpu()
+            out_tensors[f"{name}.vcore_shape"] = torch.tensor(orig_shape, dtype=torch.int64)
+            out_tensors[f"{name}.vcore_group"] = torch.tensor([chosen_g], dtype=torch.int64)
+            out_tensors[f"{name}.vcore_bits"] = torch.tensor([bits], dtype=torch.int64)
+            total_l1_err += layer_err
+        else:
+            out_tensors[name] = tensor.cpu()
+            rolled_back_layers += 1
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    save_file(out_tensors, output_path)
+
+    orig_mb = os.path.getsize(input_path) / (1024 * 1024)
+    new_mb = os.path.getsize(output_path) / (1024 * 1024)
+
+    return {
+        "quantized_158bit_layers": q2_layers,
+        "quantized_int4_layers": q4_layers,
+        "rolled_back_fp16_layers": rolled_back_layers,
+        "effective_max_rel_error": max_rel_error,
+        "orig_size_mb": orig_mb,
+        "packed_size_mb": new_mb,
+        "compression_ratio": orig_mb / max(new_mb, 1e-6),
+        "total_l1_orig": total_l1_orig,
+        "total_l1_err": total_l1_err,
+    }
+
+
+def repack_sharded_model(
+    input_dir: str,
+    output_dir: str,
+    group_size: int = 32,
+    theta: float = 1e-4,
+    max_rel_error: float = 0.40,
+    include_aux_layers: bool = True,
+    auto_theta: bool = True,
+    cascade: bool = True,
+    target_vram_gb: Optional[float] = None,
+) -> Dict[str, float]:
+    os.makedirs(output_dir, exist_ok=True)
+    shard_files = sorted(glob.glob(os.path.join(input_dir, "*.safetensors")))
+    if not shard_files:
+        raise FileNotFoundError(f"В папке {input_dir} не найдены файлы .safetensors")
+
+    per_shard_vram = (target_vram_gb / len(shard_files)) if target_vram_gb else None
+    agg = {
+        "shards_processed": len(shard_files),
+        "quantized_158bit_layers": 0,
+        "quantized_int4_layers": 0,
+        "rolled_back_fp16_layers": 0,
+        "orig_size_mb": 0.0,
+        "packed_size_mb": 0.0,
+        "total_l1_orig": 0.0,
+        "total_l1_err": 0.0,
+    }
+    new_weight_map: Dict[str, str] = {}
+
+    for shard_path in shard_files:
+        fname = os.path.basename(shard_path)
+        out_shard = os.path.join(output_dir, fname)
+        st = repack_safetensors_layerwise(
+            shard_path,
+            out_shard,
+            group_size=group_size,
+            theta=theta,
+            max_rel_error=max_rel_error,
+            include_aux_layers=include_aux_layers,
+            auto_theta=auto_theta,
+            cascade=cascade,
+            target_vram_gb=per_shard_vram,
+        )
+        for k in (
+            "quantized_158bit_layers",
+            "quantized_int4_layers",
+            "rolled_back_fp16_layers",
+            "orig_size_mb",
+            "packed_size_mb",
+            "total_l1_orig",
+            "total_l1_err",
+        ):
+            agg[k] += st[k]
+
+        for k in load_file(out_shard).keys():
+            new_weight_map[k] = fname
+
+    for item in os.listdir(input_dir):
+        src_item = os.path.join(input_dir, item)
+        dst_item = os.path.join(output_dir, item)
+        if item == "model.safetensors.index.json":
+            with open(src_item, "r", encoding="utf-8") as f:
+                idx_data = json.load(f)
+            idx_data["weight_map"] = new_weight_map
+            idx_data.setdefault("metadata", {})["vcore_quantized"] = "1.58bit-int4-cascade"
+            with open(dst_item, "w", encoding="utf-8") as f:
+                json.dump(idx_data, f, indent=2)
+        elif not item.endswith(".safetensors") and os.path.isfile(src_item):
+            shutil.copy2(src_item, dst_item)
+
+    agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
+    return agg
+
+
+def repack_hf_hub_model(
+    repo_id: str,
+    output_dir: str,
+    group_size: int = 32,
+    theta: float = 1e-4,
+    max_rel_error: float = 0.40,
+    token: Optional[str] = None,
+    target_vram_gb: Optional[float] = None,
+) -> Dict[str, float]:
+    from huggingface_hub import HfApi, hf_hub_download
+
+    os.makedirs(output_dir, exist_ok=True)
+    api = HfApi(token=token)
+    repo_files = api.list_repo_files(repo_id=repo_id)
+    shard_names = sorted([f for f in repo_files if f.endswith(".safetensors")])
+    if not shard_names:
+        raise FileNotFoundError(f"В репозитории {repo_id} нет файлов .safetensors")
+
+    per_shard_vram = (target_vram_gb / len(shard_names)) if target_vram_gb else None
+    agg = {
+        "shards_processed": len(shard_names),
+        "quantized_158bit_layers": 0,
+        "quantized_int4_layers": 0,
+        "rolled_back_fp16_layers": 0,
+        "orig_size_mb": 0.0,
+        "packed_size_mb": 0.0,
+        "total_l1_orig": 0.0,
+        "total_l1_err": 0.0,
+    }
+    new_weight_map: Dict[str, str] = {}
+
+    with tempfile.TemporaryDirectory() as tmp_dl:
+        for fname in repo_files:
+            if not fname.endswith(".safetensors") and "/" not in fname:
+                local_cfg = hf_hub_download(repo_id=repo_id, filename=fname, local_dir=tmp_dl, token=token)
+                if fname != "model.safetensors.index.json":
+                    shutil.copy2(local_cfg, os.path.join(output_dir, fname))
+
+        for s_name in shard_names:
+            local_shard = hf_hub_download(repo_id=repo_id, filename=s_name, local_dir=tmp_dl, token=token)
+            out_shard = os.path.join(output_dir, os.path.basename(s_name))
+            st = repack_safetensors_layerwise(
+                local_shard,
+                out_shard,
+                group_size=group_size,
+                theta=theta,
+                max_rel_error=max_rel_error,
+                target_vram_gb=per_shard_vram,
+            )
+            for k in (
+                "quantized_158bit_layers",
+                "quantized_int4_layers",
+                "rolled_back_fp16_layers",
+                "orig_size_mb",
+                "packed_size_mb",
+                "total_l1_orig",
+                "total_l1_err",
+            ):
+                agg[k] += st[k]
+
+            for k in load_file(out_shard).keys():
+                new_weight_map[k] = os.path.basename(s_name)
+
+            if os.path.exists(local_shard):
+                os.remove(local_shard)
+
+        idx_src = os.path.join(tmp_dl, "model.safetensors.index.json")
+            def _estimate_threshold_for_vram(
+    state_dict: Dict[str, torch.Tensor],
+    target_vram_gb: float,
+    group_size: int,
+    theta: float,
+    auto_theta: bool,
+) -> float:
+    """Подбирает max_rel_error так, чтобы сжатая модель уложилась в target_vram_gb."""
+    target_bytes = target_vram_gb * (1024 ** 3)
+    total_fp16_bytes = sum(t.numel() * 2 for t in state_dict.values())
+    if total_fp16_bytes <= target_bytes:
+        return 0.35
+
+    layer_profiles = []
+    fixed_bytes = 0
+    for name, t in state_dict.items():
+        if not t.is_floating_point() or t.ndim < 2 or t.numel() < 64:
+            fixed_bytes += t.numel() * t.element_size()
+            continue
+        w_f32 = t.to(torch.float32)
+        orig_l1 = torch.sum(torch.abs(w_f32)).item()
+        eff_g = min(group_size, w_f32.numel())
+        padded, orig_n = _pad_to_group(w_f32.reshape(-1), eff_g)
+        q = VCoreTernaryQuantizer(group_size=eff_g, theta=theta, auto_theta=auto_theta)
+        w_q, _, _ = q.quantize(padded)
+        rel_err = torch.sum(torch.abs(w_f32 - w_q[:orig_n].reshape(t.shape))).item() / (orig_l1 + 1e-8)
+        fp_b = t.numel() * 2
+        q2_b = (t.numel() + 3) // 4 + ((t.numel() + eff_g - 1) // eff_g) * 2
+        layer_profiles.append((rel_err, fp_b, q2_b))
+
+    layer_profiles.sort(key=lambda x: x)
+    cur_bytes = fixed_bytes + sum(x[1] for x in layer_profiles)
+    chosen_thresh = 0.40
+    for rel_err, fp_b, q2_b in layer_profiles:
+        if cur_bytes <= target_bytes:
+            break
+        cur_bytes -= (fp_b - q2_b)
+        chosen_thresh = max(chosen_thresh, rel_err + 1e-4)
+    return min(chosen_thresh, 0.95)
+
+
+def repack_safetensors_layerwise(
+    input_path: str,
+    output_path: str,
+    group_size: int = 32,
+    theta: float = 1e-4,
+    max_rel_error: float = 0.40,
+    include_aux_layers: bool = True,
+    auto_theta: bool = True,
+    cascade: bool = True,
+    target_vram_gb: Optional[float] = None,
+) -> Dict[str, float]:
+    state_dict = load_file(input_path)
+    if target_vram_gb is not None and target_vram_gb > 0:
+        max_rel_error = _estimate_threshold_for_vram(
+            state_dict, target_vram_gb, group_size, theta, auto_theta
+        )
+
+    out_tensors: Dict[str, torch.Tensor] = {}
+    cascade_groups = (
+        sorted(list({g for g in [group_size, 32, 16] if g <= group_size}), reverse=True)
+        if cascade else [group_size]
+    )
+
+    q2_layers = 0
+    q4_layers = 0
+    rolled_back_layers = 0
+    total_l1_orig = 0.0
+    total_l1_err = 0.0
+
+    for name, tensor in state_dict.items():
+        if not tensor.is_floating_point() or tensor.numel() == 0:
+            out_tensors[name] = tensor.cpu()
+            continue
+        if not include_aux_layers and tensor.ndim < 2:
+            out_tensors[name] = tensor.cpu()
+            continue
+
+        w_f32 = tensor.to(torch.float32)
+        total_l1_orig += torch.sum(torch.abs(w_f32)).item()
+
+        res = _quantize_tensor_cascade(
+            w_f32=w_f32,
+            cascade_groups=cascade_groups,
+            theta=theta,
+            max_rel_error=max_rel_error,
+            auto_theta=auto_theta,
+            allow_int4=cascade,
+        )
+
+        if res is not None:
+            grid, scales, chosen_g, bits, layer_err = res
+            if bits == 2:
+                packed_bytes, orig_shape = pack_ternary_to_uint8(grid)
+                q2_layers += 1
+            else:
+                packed_bytes, orig_shape = pack_int4_to_uint8(grid)
+                q4_layers += 1
+
+            out_tensors[f"{name}.vcore_packed"] = packed_bytes.cpu()
+            out_tensors[f"{name}.vcore_scales"] = scales.to(torch.float16).cpu()
+            out_tensors[f"{name}.vcore_shape"] = torch.tensor(orig_shape, dtype=torch.int64)
+            out_tensors[f"{name}.vcore_group"] = torch.tensor([chosen_g], dtype=torch.int64)
+            out_tensors[f"{name}.vcore_bits"] = torch.tensor([bits], dtype=torch.int64)
+            total_l1_err += layer_err
+        else:
+            out_tensors[name] = tensor.cpu()
+            rolled_back_layers += 1
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    save_file(out_tensors, output_path)
+
+    orig_mb = os.path.getsize(input_path) / (1024 * 1024)
+    new_mb = os.path.getsize(output_path) / (1024 * 1024)
+
+    return {
+        "quantized_158bit_layers": q2_layers,
+        "quantized_int4_layers": q4_layers,
+        "rolled_back_fp16_layers": rolled_back_layers,
+        "effective_max_rel_error": max_rel_error,
+        "orig_size_mb": orig_mb,
+        "packed_size_mb": new_mb,
+        "compression_ratio": orig_mb / max(new_mb, 1e-6),
+        "total_l1_orig": total_l1_orig,
+        "total_l1_err": total_l1_err,
+    }
+
+
+def repack_sharded_model(
+    input_dir: str,
+    output_dir: str,
+    group_size: int = 32,
+    theta: float = 1e-4,
+    max_rel_error: float = 0.40,
+    include_aux_layers: bool = True,
+    auto_theta: bool = True,
+    cascade: bool = True,
+    target_vram_gb: Optional[float] = None,
+) -> Dict[str, float]:
+    os.makedirs(output_dir, exist_ok=True)
+    shard_files = sorted(glob.glob(os.path.join(input_dir, "*.safetensors")))
+    if not shard_files:
+        raise FileNotFoundError(f"В папке {input_dir} не найдены файлы .safetensors")
+
+    per_shard_vram = (target_vram_gb / len(shard_files)) if target_vram_gb else None
+    agg = {
+        "shards_processed": len(shard_files),
+        "quantized_158bit_layers": 0,
+        "quantized_int4_layers": 0,
+        "rolled_back_fp16_layers": 0,
+        "orig_size_mb": 0.0,
+        "packed_size_mb": 0.0,
+        "total_l1_orig": 0.0,
+        "total_l1_err": 0.0,
+    }
+    new_weight_map: Dict[str, str] = {}
+
+    for shard_path in shard_files:
+        fname = os.path.basename(shard_path)
+        out_shard = os.path.join(output_dir, fname)
+        st = repack_safetensors_layerwise(
+            shard_path,
+            out_shard,
+            group_size=group_size,
+            theta=theta,
+            max_rel_error=max_rel_error,
+            include_aux_layers=include_aux_layers,
+            auto_theta=auto_theta,
+            cascade=cascade,
+            target_vram_gb=per_shard_vram,
+        )
+        for k in (
+            "quantized_158bit_layers",
+            "quantized_int4_layers",
+            "rolled_back_fp16_layers",
+            "orig_size_mb",
+            "packed_size_mb",
+            "total_l1_orig",
+            "total_l1_err",
+        ):
+            agg[k] += st[k]
+
+        for k in load_file(out_shard).keys():
+            new_weight_map[k] = fname
+
+    for item in os.listdir(input_dir):
+        src_item = os.path.join(input_dir, item)
+        dst_item = os.path.join(output_dir, item)
+        if item == "model.safetensors.index.json":
+            with open(src_item, "r", encoding="utf-8") as f:
+                idx_data = json.load(f)
+            idx_data["weight_map"] = new_weight_map
+            idx_data.setdefault("metadata", {})["vcore_quantized"] = "1.58bit-int4-cascade"
+            with open(dst_item, "w", encoding="utf-8") as f:
+                json.dump(idx_data, f, indent=2)
+        elif not item.endswith(".safetensors") and os.path.isfile(src_item):
+            shutil.copy2(src_item, dst_item)
+
+    agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
+    return agg
+
+
+def repack_hf_hub_model(
+    repo_id: str,
+    output_dir: str,
+    group_size: int = 32,
+    theta: float = 1e-4,
+    max_rel_error: float = 0.40,
+    token: Optional[str] = None,
+    target_vram_gb: Optional[float] = None,
+) -> Dict[str, float]:
+    from huggingface_hub import HfApi, hf_hub_download
+
+    os.makedirs(output_dir, exist_ok=True)
+    api = HfApi(token=token)
+    repo_files = api.list_repo_files(repo_id=repo_id)
+    shard_names = sorted([f for f in repo_files if f.endswith(".safetensors")])
+    if not shard_names:
+        raise FileNotFoundError(f"В репозитории {repo_id} нет файлов .safetensors")
+
+    per_shard_vram = (target_vram_gb / len(shard_names)) if target_vram_gb else None
+    agg = {
+        "shards_processed": len(shard_names),
+        "quantized_158bit_layers": 0,
+        "quantized_int4_layers": 0,
+        "rolled_back_fp16_layers": 0,
+        "orig_size_mb": 0.0,
+        "packed_size_mb": 0.0,
+        "total_l1_orig": 0.0,
+        "total_l1_err": 0.0,
+    }
+    new_weight_map: Dict[str, str] = {}
+
+    with tempfile.TemporaryDirectory() as tmp_dl:
+        for fname in repo_files:
+            if not fname.endswith(".safetensors") and "/" not in fname:
+                local_cfg = hf_hub_download(repo_id=repo_id, filename=fname, local_dir=tmp_dl, token=token)
+                if fname != "model.safetensors.index.json":
+                    shutil.copy2(local_cfg, os.path.join(output_dir, fname))
+
+        for s_name in shard_names:
+            local_shard = hf_hub_download(repo_id=repo_id, filename=s_name, local_dir=tmp_dl, token=token)
+            out_shard = os.path.join(output_dir, os.path.basename(s_name))
+            st = repack_safetensors_layerwise(
+                local_shard,
+                out_shard,
+                group_size=group_size,
+                theta=theta,
+                max_rel_error=max_rel_error,
+                target_vram_gb=per_shard_vram,
+            )
+            for k in (
+                "quantized_158bit_layers",
+                "quantized_int4_layers",
+                "rolled_back_fp16_layers",
+                "orig_size_mb",
+                "packed_size_mb",
+                "total_l1_orig",
+                "total_l1_err",
+            ):
+                agg[k] += st[k]
+
+            for k in load_file(out_shard).keys():
+                new_weight_map[k] = os.path.basename(s_name)
+
+            if os.path.exists(local_shard):
+                os.remove(local_shard)
+
+                idx_src = os.path.join(tmp_dl, "model.safetensors.index.json")
+        if os.path.exists(idx_src):
+            with open(idx_src, "r", encoding="utf-8") as f:
+                idx_data = json.load(f)
+            idx_data["weight_map"] = new_weight_map
+            idx_data.setdefault("metadata", {})["vcore_quantized"] = "1.58bit-int4-cascade"
+            with open(os.path.join(output_dir, "model.safetensors.index.json"), "w", encoding="utf-8") as f:
+                json.dump(idx_data, f, indent=2)
+
+    agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
+    return agg
