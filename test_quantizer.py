@@ -85,7 +85,7 @@ def main():
     assert k_cat.shape == (1, 4, 9, 64) and cache.get_seq_length() == 9
 
     from vcore_l1 import solve_chain_overlap_fpt
-    w_chain = torch.tensor([4.0, 0.0, 4.0, 0.0])
+    w_chain = torch.tensor([4.0, 0.0, -4.0, 0.0])
     c_opt, fpt_cost = solve_chain_overlap_fpt(w_chain, num_grid=9)
     assert c_opt.shape == (4,) and fpt_cost == 0.0
 
