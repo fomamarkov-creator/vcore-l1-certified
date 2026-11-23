@@ -444,6 +444,7 @@ def repack_safetensors_layerwise(
     auto_theta: bool = True,
     cascade: bool = True,
     target_vram_gb: Optional[float] = None,
+    channel_perm: bool = True,
 ) -> Dict[str, float]:
     state_dict = load_file(input_path)
     if target_vram_gb is not None and target_vram_gb > 0:
@@ -474,8 +475,17 @@ def repack_safetensors_layerwise(
         w_f32 = tensor.to(torch.float32)
         total_l1_orig += torch.sum(torch.abs(w_f32)).item()
 
+        # Группировка столбцов с выбросами по L1-норме перед разбиением на Δ=1 блоки
+        perm = None
+        if channel_perm and w_f32.ndim == 2 and w_f32.shape[1] >= 16:
+            col_l1 = torch.sum(torch.abs(w_f32), dim=0)
+            perm = torch.argsort(col_l1, descending=True)
+            w_work = w_f32[:, perm]
+        else:
+            w_work = w_f32
+
         res = _quantize_tensor_cascade(
-            w_f32=w_f32,
+            w_f32=w_work,
             cascade_groups=cascade_groups,
             theta=theta,
             max_rel_error=max_rel_error,
@@ -497,6 +507,8 @@ def repack_safetensors_layerwise(
             out_tensors[f"{name}.vcore_shape"] = torch.tensor(orig_shape, dtype=torch.int64)
             out_tensors[f"{name}.vcore_group"] = torch.tensor([chosen_g], dtype=torch.int64)
             out_tensors[f"{name}.vcore_bits"] = torch.tensor([bits], dtype=torch.int64)
+            if perm is not None:
+                out_tensors[f"{name}.vcore_perm"] = perm.to(torch.int64).cpu()
             total_l1_err += layer_err
         else:
             out_tensors[name] = tensor.cpu()
@@ -519,6 +531,7 @@ def repack_safetensors_layerwise(
         "total_l1_orig": total_l1_orig,
         "total_l1_err": total_l1_err,
     }
+
 
 
 def repack_sharded_model(
