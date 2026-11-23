@@ -114,8 +114,10 @@ class VCoreDynamicCache:
 
     def get_seq_length(self, layer_idx: int = 0) -> int:
         return self._seen_tokens
-        class VCoreLinear(nn.Module):
-    """Drop-in замена для nn.Linear (2-bit / 4-bit + Δ=1 перестановка каналов с выбросами)."""
+class VCoreLinear(nn.Module):
+    """
+    Drop-in замена для nn.Linear (2-bit / 4-bit + Δ=1 перестановка каналов с выбросами).
+    """
     def __init__(
         self,
         in_features: int,
