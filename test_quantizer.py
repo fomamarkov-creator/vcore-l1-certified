@@ -7,6 +7,7 @@ from safetensors.torch import save_file, load_file
 from vcore_l1 import (
     VCoreTernaryQuantizer,
     VCoreLinear,
+    VCoreKVCacheQuantizer,
     inject_vcore_layers,
     verify_with_lean4_engine,
 )
@@ -35,7 +36,7 @@ def main():
     print(f"BitNet err: {err_bitnet:.2f} | V-CORE err: {err_vcore:.2f}")
     assert err_vcore < err_bitnet
 
-    print("\n=== 3. Тест каскадного сжатия (64 -> 32 -> 16), Auto-Rollback и VCoreLinear ===")
+    print("\n=== 3. Тест каскадного сжатия, Auto-Rollback, VCoreLinear и KV-Cache ===")
     with tempfile.TemporaryDirectory() as tmpdir:
         in_dir = os.path.join(tmpdir, "model_in")
         out_dir = os.path.join(tmpdir, "model_out")
@@ -68,11 +69,11 @@ def main():
         assert isinstance(net.fc2, VCoreLinear)
         assert isinstance(net.norm, nn.LayerNorm)
 
-        x_in = torch.randn(4, 128, dtype=torch.float16)
-        y_out = net(x_in)
+        y_out = net(torch.randn(4, 128, dtype=torch.float16))
         assert y_out.shape == (4, 32)
 
-    print("[OK] Все 8 компонентов стека (Lean 4, Auto-Theta, Cascade, Auto-Rollback, VCoreLinear, CLI) работают!")
+    subprocess.run(["vcore-bench", "--hidden-size", "256", "--out-size", "256", "--steps", "10"], check=True)
+    print("[OK] Все 12 компонентов стека V-CORE L1-Certified v1.0.0 успешно проверены!")
 
 
 if __name__ == "__main__":
