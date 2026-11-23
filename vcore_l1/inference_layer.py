@@ -77,25 +77,33 @@ class VCoreKVCacheQuantizer:
 
 
 class VCoreLinear(nn.Module):
-    """Drop-in замена для nn.Linear на сжатых 2-битных весах с Δ=1 медианными масштабами."""
+    """Drop-in замена для nn.Linear (2-bit / 4-bit + Δ=1 перестановка каналов с выбросами)."""
     def __init__(
         self,
         in_features: int,
         out_features: int,
         group_size: int = 32,
+        bits: int = 2,
         bias: bool = False,
+        has_perm: bool = False,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.group_size = group_size
+        self.bits = bits
 
         num_elems = out_features * in_features
-        packed_len = (num_elems + 3) // 4
+        packed_len = (num_elems + 3) // 4 if bits == 2 else (num_elems + 1) // 2
         num_blocks = (num_elems + group_size - 1) // group_size
 
         self.register_buffer("vcore_packed", torch.zeros(packed_len, dtype=torch.uint8))
         self.register_buffer("vcore_scales", torch.zeros(num_blocks, dtype=torch.float16))
+        if has_perm:
+            self.register_buffer("vcore_perm", torch.arange(in_features, dtype=torch.int64))
+        else:
+            self.vcore_perm = None
+
         if bias:
             self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
         else:
@@ -108,12 +116,23 @@ class VCoreLinear(nn.Module):
         scales: torch.Tensor,
         shape: Tuple[int, int],
         group_size: int,
+        bits: int = 2,
         bias: Optional[torch.Tensor] = None,
+        perm: Optional[torch.Tensor] = None,
     ) -> "VCoreLinear":
         out_features, in_features = shape
-        layer = cls(in_features, out_features, group_size=group_size, bias=(bias is not None))
+        layer = cls(
+            in_features,
+            out_features,
+            group_size=group_size,
+            bits=bits,
+            bias=(bias is not None),
+            has_perm=(perm is not None),
+        )
         layer.vcore_packed.copy_(packed)
         layer.vcore_scales.copy_(scales.to(torch.float16))
+        if perm is not None:
+            layer.vcore_perm.copy_(perm.to(torch.int64))
         if bias is not None:
             layer.bias.copy_(bias.to(torch.float16))
         return layer
@@ -121,10 +140,13 @@ class VCoreLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_shape = x.shape
         x_2d = x.reshape(-1, self.in_features)
+        if self.vcore_perm is not None:
+            x_2d = x_2d[:, self.vcore_perm]
         batch_tokens = x_2d.shape[0]
 
         if (
-            _CUDA_LIB is not None
+            self.bits == 2
+            and _CUDA_LIB is not None
             and x_2d.is_cuda
             and (self.in_features % self.group_size == 0)
             and (self.in_features % 4 == 0)
@@ -148,17 +170,20 @@ class VCoreLinear(nn.Module):
                 out = out + self.bias.to(x.dtype)
             return out.reshape(*orig_shape[:-1], self.out_features)
 
-        mask = unpack_uint8_to_ternary(self.vcore_packed, (self.out_features, self.in_features)).to(x.device)
+        if self.bits == 2:
+            grid = unpack_uint8_to_ternary(self.vcore_packed, (self.out_features, self.in_features)).to(x.device)
+        else:
+            grid = unpack_uint8_to_int4(self.vcore_packed, (self.out_features, self.in_features)).to(x.device)
+
         scales = self.vcore_scales.to(torch.float32)
-        w_restored = (mask.reshape(-1, self.group_size) * scales.unsqueeze(1)).reshape(
+        w_restored = (grid.reshape(-1, self.group_size) * scales.unsqueeze(1)).reshape(
             self.out_features, self.in_features
         ).to(x.dtype)
         bias = self.bias.to(x.dtype) if self.bias is not None else None
-        return F.linear(x, w_restored, bias)
+        return F.linear(x_2d, w_restored, bias).reshape(*orig_shape[:-1], self.out_features)
 
 
 def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -> nn.Module:
-    """Подменяет все сжатые слои nn.Linear в модели на VCoreLinear и загружает оставшиеся FP16-веса."""
     for full_name, module in list(model.named_modules()):
         if isinstance(module, nn.Linear):
             w_key = f"{full_name}.weight"
@@ -168,6 +193,8 @@ def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -
                 scales = state_dict[f"{w_key}.vcore_scales"]
                 shape = tuple(state_dict[f"{w_key}.vcore_shape"].tolist())
                 g_size = int(state_dict[f"{w_key}.vcore_group"].item())
+                bits = int(state_dict[f"{w_key}.vcore_bits"].item()) if f"{w_key}.vcore_bits" in state_dict else 2
+                perm = state_dict.get(f"{w_key}.vcore_perm", None)
                 bias_tensor = state_dict.get(f"{full_name}.bias", None)
 
                 vcore_layer = VCoreLinear.from_packed_tensors(
@@ -175,16 +202,16 @@ def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -
                     scales=scales,
                     shape=(shape[0], shape[1]),
                     group_size=g_size,
+                    bits=bits,
                     bias=bias_tensor,
+                    perm=perm,
                 )
-
                 parts = full_name.split(".")
                 parent = model
                 for p in parts[:-1]:
                     parent = getattr(parent, p)
                 setattr(parent, parts[-1], vcore_layer)
 
-    # Загружаем откатившиеся в FP16 слои (norm, embed, lm_head и т.д.)
     non_packed = {k: v for k, v in state_dict.items() if ".vcore_" not in k}
     model.load_state_dict(non_packed, strict=False)
     return model
