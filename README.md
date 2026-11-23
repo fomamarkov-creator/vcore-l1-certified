@@ -32,7 +32,7 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 
 ### 1. Clone & Build Everything
 ```bash
-git clone https://github.com
+git clone https://github.com/fomamarkov-creator/vcore-l1-certified
 cd vcore-l1-certified
 bash setup.sh
 ```
