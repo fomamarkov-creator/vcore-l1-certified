@@ -3,6 +3,7 @@ from .matrix_generator import generate_markov_q
 from .inference_layer import (
     VCoreLinear,
     VCoreKVCacheQuantizer,
+    VCoreModelForCausalLM,
     inject_vcore_layers,
     load_vcore_causal_lm,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "generate_markov_q",
     "VCoreLinear",
     "VCoreKVCacheQuantizer",
+    "VCoreModelForCausalLM",
     "inject_vcore_layers",
     "load_vcore_causal_lm",
     "pack_ternary_to_uint8",
