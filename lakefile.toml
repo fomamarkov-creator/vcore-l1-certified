@@ -1,0 +1,12 @@
+name = "VCoreL1Certified"
+version = "0.1.0"
+defaultTargets = ["vcore_certifier"]
+
+[[require]]
+name = "MarkovL1Complexity"
+git = "https://github.com"
+rev = "v2.0.0"
+
+[[lean_exe]]
+name = "vcore_certifier"
+root = "CertifierMain"
