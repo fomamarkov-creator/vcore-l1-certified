@@ -2,13 +2,15 @@
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
 import ctypes
+import glob
 import os
 from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import load_file
-from .safetensors_quantizer import unpack_uint8_to_ternary
+from .cuda_quantizer import VCoreTernaryQuantizer
+from .safetensors_quantizer import pack_ternary_to_uint8, unpack_uint8_to_ternary
 
 
 def _load_cuda_lib() -> Optional[ctypes.CDLL]:
@@ -39,11 +41,43 @@ def _load_cuda_lib() -> Optional[ctypes.CDLL]:
 _CUDA_LIB = _load_cuda_lib()
 
 
+class VCoreKVCacheQuantizer:
+    """
+    Сжатие KV-кэша (Key/Value состояний трансформера) на лету в 2-битный формат
+    с оптимальными Δ=1 медианными масштабами (сокращает VRAM длинного контекста в ~6 раз).
+    """
+    def __init__(self, group_size: int = 32, theta: float = 1e-4):
+        self.group_size = group_size
+        self.quantizer = VCoreTernaryQuantizer(group_size=group_size, theta=theta, auto_theta=True)
+
+    def compress_kv(self, kv_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...]]:
+        orig_shape = tuple(kv_tensor.shape)
+        flat = kv_tensor.reshape(-1).to(torch.float32)
+        rem = flat.numel() % self.group_size
+        if rem != 0:
+            flat = torch.cat([flat, torch.zeros(self.group_size - rem, dtype=flat.dtype, device=flat.device)])
+        _, mask, scales = self.quantizer.quantize(flat)
+        packed, _ = pack_ternary_to_uint8(mask)
+        return packed, scales.to(torch.float16), orig_shape
+
+    def decompress_kv(
+        self,
+        packed: torch.Tensor,
+        scales: torch.Tensor,
+        orig_shape: Tuple[int, ...],
+        dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        total_elems = 1
+        for d in orig_shape:
+            total_elems *= d
+        padded_len = ((total_elems + self.group_size - 1) // self.group_size) * self.group_size
+        mask = unpack_uint8_to_ternary(packed, (padded_len,)).to(packed.device)
+        restored = (mask.reshape(-1, self.group_size) * scales.to(torch.float32).unsqueeze(1)).reshape(-1)
+        return restored[:total_elems].reshape(orig_shape).to(dtype)
+
+
 class VCoreLinear(nn.Module):
-    """
-    Drop-in замена для nn.Linear: хранит веса в сжатом 2-битном формате uint8
-    и оптимальные Δ=1 медианные масштабы (float16).
-    """
+    """Drop-in замена для nn.Linear на сжатых 2-битных весах с Δ=1 медианными масштабами."""
     def __init__(
         self,
         in_features: int,
@@ -89,7 +123,6 @@ class VCoreLinear(nn.Module):
         x_2d = x.reshape(-1, self.in_features)
         batch_tokens = x_2d.shape[0]
 
-        # Прямой Fused CUDA-инференс на GPU (без распаковки весов в VRAM!)
         if (
             _CUDA_LIB is not None
             and x_2d.is_cuda
@@ -115,8 +148,7 @@ class VCoreLinear(nn.Module):
                 out = out + self.bias.to(x.dtype)
             return out.reshape(*orig_shape[:-1], self.out_features)
 
-        # Быстрый векторный путь PyTorch (CPU или GPU без скомпилированного .so)
-        mask = unpack_uint8_to_ternary(self.vcore_packed, (self.out_features, self.in_features))
+        mask = unpack_uint8_to_ternary(self.vcore_packed, (self.out_features, self.in_features)).to(x.device)
         scales = self.vcore_scales.to(torch.float32)
         w_restored = (mask.reshape(-1, self.group_size) * scales.unsqueeze(1)).reshape(
             self.out_features, self.in_features
@@ -126,10 +158,7 @@ class VCoreLinear(nn.Module):
 
 
 def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -> nn.Module:
-    """
-    Автоматически заменяет все линейные слои nn.Linear в модели PyTorch / Hugging Face
-    на сжатые слои VCoreLinear, загружая ключи *.vcore_packed и *.vcore_scales.
-    """
+    """Подменяет все сжатые слои nn.Linear в модели на VCoreLinear и загружает оставшиеся FP16-веса."""
     for full_name, module in list(model.named_modules()):
         if isinstance(module, nn.Linear):
             w_key = f"{full_name}.weight"
@@ -149,10 +178,38 @@ def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -
                     bias=bias_tensor,
                 )
 
-                # Подменяем модуль в родительском контейнере
                 parts = full_name.split(".")
                 parent = model
                 for p in parts[:-1]:
                     parent = getattr(parent, p)
                 setattr(parent, parts[-1], vcore_layer)
+
+    # Загружаем откатившиеся в FP16 слои (norm, embed, lm_head и т.д.)
+    non_packed = {k: v for k, v in state_dict.items() if ".vcore_" not in k}
+    model.load_state_dict(non_packed, strict=False)
     return model
+
+
+def load_vcore_causal_lm(model_dir: str, device: str = "cpu", dtype: torch.dtype = torch.float16):
+    """
+    Загрузчик в 1 строку для сжатых моделей Hugging Face (transformers):
+    создаёт архитектуру по config.json, подставляет VCoreLinear и переносит на device.
+    """
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.from_pretrained(model_dir)
+    with torch.device("meta"):
+        model = AutoModelForCausalLM.from_config(config, torch_dtype=dtype)
+    model = model.to_empty(device="cpu")
+
+    shard_files = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
+    if not shard_files:
+        raise FileNotFoundError(f"В папке {model_dir} не найдены .safetensors файлы")
+
+    merged_sd: Dict[str, torch.Tensor] = {}
+    for sf in shard_files:
+        merged_sd.update(load_file(sf))
+
+    model = inject_vcore_layers(model, merged_sd)
+    return model.to(device=device, dtype=dtype).eval()
+    
