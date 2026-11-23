@@ -45,33 +45,45 @@ def main():
     print(f"Ошибка V-CORE (Delta=1 Med)   : {err_vcore:.2f} (снижение ошибки на {reduction:.1f}%)")
     assert err_vcore < err_bitnet, "V-CORE должен давать меньшую L1-ошибку, чем absmean!"
 
-    print("\n=== 3. Тест послойной переупаковки модели (.safetensors -> 2-bit uint8) ===")
+    print("\n=== 3. Тест адаптивной послойной переупаковки (.safetensors + Auto-Rollback) ===")
     with tempfile.TemporaryDirectory() as tmpdir:
         in_file = os.path.join(tmpdir, "model_fp16.safetensors")
         out_file = os.path.join(tmpdir, "model_vcore_158bit.safetensors")
 
-        # Создаём тестовый многослойный чекпоинт (2 рабочих линейных слоя + 1 LayerNorm)
+        # Создаём чувствительный 1D-слой с сильным разбросом амплитуд (должен откатиться в FP16)
+        sensitive_norm = torch.linspace(0.01, 25.0, 512, dtype=torch.float16)
+
         dummy_model = {
             "model.layers.0.self_attn.q_proj.weight": torch.randn(256, 512, dtype=torch.float16),
             "model.layers.0.mlp.gate_proj.weight": torch.randn(512, 512, dtype=torch.float16),
-            "model.layers.0.input_layernorm.weight": torch.ones(512, dtype=torch.float16),
+            "model.layers.0.input_layernorm.weight": sensitive_norm,
         }
         save_file(dummy_model, in_file)
 
-        stats = repack_safetensors_layerwise(in_file, out_file, group_size=32, theta=1e-4)
+        stats = repack_safetensors_layerwise(
+            in_file,
+            out_file,
+            group_size=32,
+            theta=1e-4,
+            max_rel_error=0.45,
+            include_aux_layers=True,
+        )
         print(f"Квантовано слоёв  : {stats['quantized_layers']}")
+        print(f"Откат в FP16      : {stats['rolled_back_layers']}")
         print(f"Размер до/после   : {stats['orig_size_mb']:.2f} MB -> {stats['packed_size_mb']:.2f} MB (сжатие в {stats['compression_ratio']:.1f}x)")
 
-        # Проверяем обратную распаковку первого слоя
         packed_dict = load_file(out_file)
+        assert stats["quantized_layers"] >= 2, "Рабочие матрицы должны быть сжаты"
+        assert stats["rolled_back_layers"] >= 1, "Чувствительный слой должен автоматически откатиться в FP16"
+        assert "model.layers.0.input_layernorm.weight" in packed_dict
+
         unpacked_mask = unpack_uint8_to_ternary(
             packed_dict["model.layers.0.self_attn.q_proj.weight.vcore_packed"],
             tuple(packed_dict["model.layers.0.self_attn.q_proj.weight.vcore_shape"].tolist()),
         )
         assert unpacked_mask.shape == (256, 512)
-        assert "model.layers.0.input_layernorm.weight" in packed_dict
 
-    print("[OK] Все тесты Lean 4, PyTorch и Safetensors успешно пройдены!")
+    print("[OK] Все тесты Lean 4, PyTorch, Safetensors и Auto-Rollback успешно пройдены!")
 
 
 if __name__ == "__main__":
