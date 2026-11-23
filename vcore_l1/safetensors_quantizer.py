@@ -98,7 +98,7 @@ def quantize_ternary_exact_critical(blocks: torch.Tensor) -> Tuple[torch.Tensor,
         best_scales = torch.where(improve.unsqueeze(1), scales, best_scales)
 
     return best_mask * best_scales, best_mask, best_scales.reshape(-1)
-    def _quantize_int4_blockwise(w_f32: torch.Tensor, group_size: int = 32) -> Tuple[torch.Tensor, torch.Tensor, float]:
+def _quantize_int4_blockwise(w_f32: torch.Tensor, group_size: int = 32) -> Tuple[torch.Tensor, torch.Tensor, float]:
     """Поблочное 4-битное квантование {-7..+7} с медианной калибровкой Δ=1."""
     flat = w_f32.reshape(-1)
     padded, orig_numel = _pad_to_group(flat, group_size)
@@ -192,7 +192,7 @@ def _estimate_threshold_for_vram(
         cur_bytes -= (fp_b - q2_b)
         chosen_thresh = max(chosen_thresh, rel_err + 1e-4)
     return min(chosen_thresh, 0.95)
-    def repack_safetensors_layerwise(
+def repack_safetensors_layerwise(
     input_path: str,
     output_path: str,
     group_size: int = 32,
