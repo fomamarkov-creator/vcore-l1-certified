@@ -24,15 +24,14 @@ def solve_chain_overlap_fpt(weights: torch.Tensor, num_grid: int = 17) -> Tuple[
     if m == 1:
         errs = torch.abs(w - grid)
         idx = int(torch.argmin(errs).item())
-        return grid[idx].view(1), float(errs[idx].item())
+        return grid.narrow(0, idx, 1).clone(), float(errs.narrow(0, idx, 1).item())
 
-    # Динамическое программирование по цепочке зависимостей Δ = 2
     dp = torch.zeros(num_grid, device=w.device, dtype=torch.float32)
     backpointers = []
 
     for i in range(1, m):
-        w_prev, w_curr = w[i - 1], w[i]
-        # Матрица переходов (prev_state, curr_state)
+        w_prev = w.narrow(0, i - 1, 1)
+        w_curr = w.narrow(0, i, 1)
         edge_cost = (
             dp.unsqueeze(1)
             + torch.abs(w_prev - grid).unsqueeze(1)
@@ -42,13 +41,14 @@ def solve_chain_overlap_fpt(weights: torch.Tensor, num_grid: int = 17) -> Tuple[
         backpointers.append(best_prev)
 
     best_last = int(torch.argmin(dp).item())
-    min_cost = float(dp[best_last].item())
+    min_cost = float(dp.narrow(0, best_last, 1).item())
 
-    # Обратный проход (восстановление оптимального вектора c*)
-    states = [0] * m
-    states[-1] = best_last
+    states = [0 for _ in range(m)]
+    states[m - 1] = best_last
     for i in range(m - 2, -1, -1):
-        states[i] = int(backpointers[i][states[i + 1]].item())
+        bp_row = backpointers[i]
+        states[i] = int(bp_row.narrow(0, states[i + 1], 1).item())
 
-    c_opt = grid[torch.tensor(states, device=w.device)]
+    c_opt = grid.index_select(0, torch.tensor(states, device=w.device, dtype=torch.int64))
     return c_opt, min_cost
+    
