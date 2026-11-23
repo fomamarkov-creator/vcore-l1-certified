@@ -18,9 +18,7 @@ jobs:
 
       - name: Install Elan & Lean 4
         run: |
-          curl -sSfL https://github.com | tar xz
-          ./elan-init -y --default-toolchain leanprover/lean4:v4.37.0-rc1
-          rm -f elan-init
+          curl -sSf https://lean-lang.org | sh -s -- -y --default-toolchain leanprover/lean4:v4.37.0-rc1
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
       - name: Build Linked Lean 4 Certifier
