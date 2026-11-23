@@ -241,7 +241,7 @@ def repack_safetensors_layerwise(
     group_size: int = 32,
     theta: float = 1e-4,
     max_rel_error: float = 0.40,
-    include_aux_layers: bool = True,
+    include_aux_layers: bool = False,
     auto_theta: bool = True,
     cascade: bool = True,
     target_vram_gb: Optional[float] = None,
