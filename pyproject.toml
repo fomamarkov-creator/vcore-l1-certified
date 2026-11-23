@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vcore-l1-certified"
-version = "0.1.0"
-description = "Hybrid Lean 4 + GPU 1.58-bit Neural Network Quantizer (Delta = 1 Optimal Median Projections)"
+version = "0.3.0"
+description = "Hybrid Lean 4 + GPU 1.58-bit Neural Network Quantizer & Inference Engine"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "AGPL-3.0-or-later"}
@@ -14,11 +14,10 @@ authors = [
 ]
 dependencies = [
     "numpy>=1.24.0",
-    "torch>=2.0.0"
+    "torch>=2.0.0",
+    "safetensors>=0.4.0",
+    "huggingface-hub>=0.20.0"
 ]
-
-[project.optional-dependencies]
-cuda = ["cupy-cuda12x>=12.0.0"]
 
 [project.scripts]
 vcore-pack = "vcore_l1.cli:main"
