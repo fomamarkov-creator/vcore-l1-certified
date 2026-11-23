@@ -1,18 +1,15 @@
 /*
  * Copyright (C) 2026 Efim Sergeevich Markov (ef.87@mail.ru)
  * Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
- *
- * V-CORE Hybrid CUDA Kernel:
- * Combines Markov's hard-threshold static filter (|x| <= theta -> 0)
- * with decoupled blockwise L1 median scaling (Delta = 1 regime).
  */
 
 #include <cuda_runtime.h>
 #include <math.h>
 
 #define EPS 1e-6f
+#define DEFAULT_ZETA 1.024f
 
-// 1. Оригинальный резонансный оптимизатор с фильтром Маркова
+// 1. Ядро резонансной оптимизации с Фильтром Маркова
 extern "C" __global__
 void vcore_optimize(const float* __restrict__ X,
                     const float* __restrict__ Q,
@@ -37,7 +34,7 @@ void vcore_optimize(const float* __restrict__ X,
     }
 }
 
-// 2. Ядро деквантования и применения тернарной маски {-1, 0, +1} с масштабом блока alpha_b*
+// 2. Ядро 1.58-bit тернарного квантования {-1, 0, +1} с масштабом блока alpha_b* (Δ = 1)
 extern "C" __global__
 void vcore_ternary_block_apply(const float* __restrict__ W,
                                const float* __restrict__ block_scales,
@@ -59,4 +56,25 @@ void vcore_ternary_block_apply(const float* __restrict__ W,
     float alpha = block_scales[block_id];
     float sign = (val > 0.0f) ? 1.0f : -1.0f;
     W_quant[idx] = sign * alpha;
+}
+
+// Хост-обёртка для вызова из VCoreEngine.cpp
+extern "C" void run_vcore_resonance(const float* d_X, const float* d_Q, float* d_V, int n) {
+    int blockSize = 256;
+    int gridSize = (n + blockSize - 1) / blockSize;
+    vcore_optimize<<<gridSize, blockSize>>>(d_X, d_Q, d_V, n, DEFAULT_ZETA);
+}
+
+// Хост-обёртка для поблочного 1.58-bit квантования на GPU
+extern "C" void run_vcore_quantize(const float* d_W,
+                                   const float* d_scales,
+                                   float* d_W_quant,
+                                   int total_elements,
+                                   int group_size,
+                                   float theta) {
+    int blockSize = 256;
+    int gridSize = (total_elements + blockSize - 1) / blockSize;
+    vcore_ternary_block_apply<<<gridSize, blockSize>>>(
+        d_W, d_scales, d_W_quant, total_elements, group_size, theta
+    );
 }
