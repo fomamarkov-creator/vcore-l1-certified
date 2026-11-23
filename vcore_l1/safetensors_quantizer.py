@@ -1,6 +1,7 @@
 # Copyright (C) 2026 Efim Sergeevich Markov (ef.87@mail.ru)
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
+import gc
 import glob
 import json
 import os
@@ -66,39 +67,60 @@ def _pad_to_group(flat: torch.Tensor, group_size: int) -> Tuple[torch.Tensor, in
         return flat, orig_numel
     pad = group_size - rem
     return torch.cat([flat, torch.zeros(pad, dtype=flat.dtype, device=flat.device)]), orig_numel
-
+    @torch.no_grad()
 def quantize_ternary_exact_critical(
     blocks: torch.Tensor,
     imp_blocks: Optional[torch.Tensor] = None,
+    chunk_size: int = 65536,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     num_blocks = blocks.size(0)
     g = blocks.size(1)
-    abs_b = torch.abs(blocks)
-    sorted_abs, _ = torch.sort(abs_b, dim=1)
-    if imp_blocks is None:
-        imp_blocks = torch.ones_like(blocks)
+    out_q = torch.empty_like(blocks)
+    out_mask = torch.empty_like(blocks)
+    out_scales = torch.empty((num_blocks,), device=blocks.device, dtype=blocks.dtype)
 
-    best_err = torch.full((num_blocks,), float("inf"), device=blocks.device, dtype=blocks.dtype)
-    best_mask = torch.zeros_like(blocks)
-    best_scales = torch.zeros((num_blocks, 1), device=blocks.device, dtype=blocks.dtype)
+    for start in range(0, num_blocks, chunk_size):
+        end = min(start + chunk_size, num_blocks)
+        b_chunk = blocks.narrow(0, start, end - start)
+        imp_chunk = (
+            imp_blocks.narrow(0, start, end - start)
+            if imp_blocks is not None
+            else torch.ones_like(b_chunk)
+        )
+        c_len = b_chunk.size(0)
+        abs_b = torch.abs(b_chunk)
+        sorted_abs, _ = torch.sort(abs_b, dim=1)
 
-    for k in range(g):
-        th = torch.zeros((num_blocks, 1), device=blocks.device, dtype=blocks.dtype) if k == 0 else sorted_abs.narrow(1, k - 1, 1)
-        active = abs_b > th
-        mask = torch.where(active, torch.sign(blocks), torch.zeros_like(blocks))
-        active_imp = torch.where(active, imp_blocks, torch.zeros_like(imp_blocks))
-        scales = _weighted_median_1d(abs_b, active_imp)
+        best_err = torch.full((c_len,), float("inf"), device=b_chunk.device, dtype=b_chunk.dtype)
+        best_mask = torch.zeros_like(b_chunk)
+        best_scales = torch.zeros((c_len, 1), device=b_chunk.device, dtype=b_chunk.dtype)
 
-        w_cand = mask * scales
-        err = torch.sum(imp_blocks * torch.abs(blocks - w_cand), dim=1)
-        improve = err < best_err
-        best_err = torch.where(improve, err, best_err)
-        best_mask = torch.where(improve.unsqueeze(1), mask, best_mask)
-        best_scales = torch.where(improve.unsqueeze(1), scales, best_scales)
+        for k in range(g):
+            th = (
+                torch.zeros((c_len, 1), device=b_chunk.device, dtype=b_chunk.dtype)
+                if k == 0
+                else sorted_abs.narrow(1, k - 1, 1)
+            )
+            active = abs_b > th
+            mask = torch.where(active, torch.sign(b_chunk), torch.zeros_like(b_chunk))
+            active_imp = torch.where(active, imp_chunk, torch.zeros_like(imp_chunk))
+            scales = _weighted_median_1d(abs_b, active_imp)
 
-    return best_mask * best_scales, best_mask, best_scales.reshape(-1)
+            w_cand = mask * scales
+            err = torch.sum(imp_chunk * torch.abs(b_chunk - w_cand), dim=1)
+            improve = err < best_err
+            best_err = torch.where(improve, err, best_err)
+            best_mask = torch.where(improve.unsqueeze(1), mask, best_mask)
+            best_scales = torch.where(improve.unsqueeze(1), scales, best_scales)
+
+        out_q.narrow(0, start, c_len).copy_(best_mask * best_scales)
+        out_mask.narrow(0, start, c_len).copy_(best_mask)
+        out_scales.narrow(0, start, c_len).copy_(best_scales.reshape(-1))
+
+    return out_q, out_mask, out_scales
 
 
+@torch.no_grad()
 def _quantize_int4_blockwise(w_f32: torch.Tensor, group_size: int = 32) -> Tuple[torch.Tensor, torch.Tensor, float]:
     flat = w_f32.reshape(-1)
     padded, orig_numel = _pad_to_group(flat, group_size)
@@ -115,6 +137,7 @@ def _quantize_int4_blockwise(w_f32: torch.Tensor, group_size: int = 32) -> Tuple
     return q_int.reshape(-1).narrow(0, 0, orig_numel).reshape(w_f32.shape), step.reshape(-1), err
 
 
+@torch.no_grad()
 def _quantize_tensor_cascade(
     w_f32: torch.Tensor,
     cascade_groups: List[int],
@@ -162,8 +185,7 @@ def _quantize_tensor_cascade(
             return q_int4, scales4, eff_g4, 4, err4
 
     return None
-
-
+    @torch.no_grad()
 def _estimate_threshold_for_vram(
     state_dict: Dict[str, torch.Tensor],
     target_vram_gb: float,
@@ -176,22 +198,31 @@ def _estimate_threshold_for_vram(
     if total_fp16_bytes <= target_bytes:
         return 0.35
 
+    work_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     layer_profiles = []
     fixed_bytes = 0
     for name, t in state_dict.items():
         if not t.is_floating_point() or t.ndim < 2 or t.numel() < 64:
             fixed_bytes += t.numel() * t.element_size()
             continue
-        w_f32 = t.to(torch.float32)
+        w_f32 = t.to(device=work_device, dtype=torch.float32)
         orig_l1 = torch.sum(torch.abs(w_f32)).item()
         eff_g = min(group_size, w_f32.numel())
         padded, orig_n = _pad_to_group(w_f32.reshape(-1), eff_g)
-        q = VCoreTernaryQuantizer(group_size=eff_g, theta=theta, auto_theta=auto_theta)
-        w_q, _, _ = q.quantize(padded)
+        if auto_theta and eff_g <= 64:
+            w_q, _, _ = quantize_ternary_exact_critical(padded.view(-1, eff_g))
+            w_q = w_q.reshape(-1)
+        else:
+            q = VCoreTernaryQuantizer(group_size=eff_g, theta=theta, auto_theta=auto_theta)
+            w_q, _, _ = q.quantize(padded)
         rel_err = torch.sum(torch.abs(w_f32 - w_q.narrow(0, 0, orig_n).reshape(t.shape))).item() / (orig_l1 + 1e-8)
         fp_b = t.numel() * 2
         q2_b = (t.numel() + 3) // 4 + ((t.numel() + eff_g - 1) // eff_g) * 2
         layer_profiles.append((rel_err, fp_b, q2_b))
+        del w_f32, padded, w_q
+
+    if work_device.type == "cuda":
+        torch.cuda.empty_cache()
 
     layer_profiles.sort(key=lambda x: x[0])
     cur_bytes = fixed_bytes + sum(x[1] for x in layer_profiles)
@@ -203,6 +234,8 @@ def _estimate_threshold_for_vram(
         chosen_thresh = max(chosen_thresh, rel_err + 1e-4)
     return min(chosen_thresh, 0.95)
 
+
+@torch.no_grad()
 def repack_safetensors_layerwise(
     input_path: str,
     output_path: str,
@@ -222,6 +255,7 @@ def repack_safetensors_layerwise(
             state_dict, target_vram_gb, group_size, theta, auto_theta
         )
 
+    work_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_tensors: Dict[str, torch.Tensor] = {}
     cascade_groups = (
         sorted(list({g for g in [group_size, 32, 16] if g <= group_size}), reverse=True)
@@ -242,18 +276,19 @@ def repack_safetensors_layerwise(
             out_tensors[name] = tensor.cpu()
             continue
 
-        w_f32 = tensor.to(torch.float32)
+        w_f32 = tensor.to(device=work_device, dtype=torch.float32)
         total_l1_orig += torch.sum(torch.abs(w_f32)).item()
 
-        act_s = activation_map.get(name, None) if activation_map is not None else None
+        act_raw = activation_map.get(name, None) if activation_map is not None else None
+        act_s = act_raw.to(device=work_device, dtype=torch.float32) if act_raw is not None else None
         perm = None
         if channel_perm and w_f32.ndim == 2 and w_f32.size(1) >= 16:
             col_l1 = torch.sum(torch.abs(w_f32), dim=0)
             if act_s is not None and act_s.numel() == w_f32.size(1):
-                col_l1 = col_l1 * torch.abs(act_s).to(col_l1.device, dtype=col_l1.dtype)
+                col_l1 = col_l1 * torch.abs(act_s)
             perm = torch.argsort(col_l1, descending=True)
             w_work = w_f32.index_select(1, perm)
-            act_work = act_s.index_select(0, perm.cpu()) if (act_s is not None and act_s.numel() == w_f32.size(1)) else None
+            act_work = act_s.index_select(0, perm) if (act_s is not None and act_s.numel() == w_f32.size(1)) else None
         else:
             w_work = w_f32
             act_work = act_s
@@ -289,6 +324,15 @@ def repack_safetensors_layerwise(
             out_tensors[name] = tensor.cpu()
             rolled_back_layers += 1
 
+        del w_f32, w_work
+        if act_s is not None:
+            del act_s
+
+    del state_dict
+    gc.collect()
+    if work_device.type == "cuda":
+        torch.cuda.empty_cache()
+
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     save_file(out_tensors, output_path)
 
@@ -305,8 +349,7 @@ def repack_safetensors_layerwise(
         "compression_ratio": orig_mb / max(new_mb, 1e-6),
         "total_l1_orig": total_l1_orig,
         "total_l1_err": total_l1_err,
-    }
-
+        }
 def repack_sharded_model(
     input_dir: str,
     output_dir: str,
@@ -462,4 +505,3 @@ def repack_hf_hub_model(
 
     agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
     return agg
-    
