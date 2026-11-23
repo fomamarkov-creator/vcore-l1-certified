@@ -62,7 +62,7 @@ quantizer = VCoreTernaryQuantizer(group_size=32, theta=1e-4)
 w_quant, ternary_mask, scales = quantizer.quantize(weights)
 ```
 
-### B. Layerwise Compression of a Full `.safetensors` Model
+### B. Adaptive Layerwise Compression of a Full `.safetensors` Model (with Auto-Rollback)
 ```python
 from vcore_l1 import repack_safetensors_layerwise
 
@@ -71,9 +71,12 @@ stats = repack_safetensors_layerwise(
     output_path="model_vcore_158bit.safetensors",
     group_size=32,
     theta=1e-4,
+    max_rel_error=0.45,
+    include_aux_layers=True,
 )
 print(stats)
 ```
+
 
 ### C. Unpack Weights for Inference
 ```python
