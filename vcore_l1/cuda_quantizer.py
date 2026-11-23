@@ -20,7 +20,7 @@ class VCoreTernaryQuantizer(nn.Module):
             raise ValueError(f"Число элементов ({weights.numel()}) должно делиться на group_size={self.group_size}")
 
         blocks = weights.reshape(-1, self.group_size)
-        num_blocks = blocks.shape[0]
+        num_blocks = blocks.size(0)
         abs_blocks = torch.abs(blocks)
         base_med = torch.median(abs_blocks, dim=1, keepdim=True).values
 
