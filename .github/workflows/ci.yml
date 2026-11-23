@@ -1,75 +1,48 @@
-name: V-CORE L1-Certified CI & CUDA Build
+name: CI
 
 on:
   push:
-    branches: ["main", "master"]
-  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  verify-lean-and-python:
-    name: Verify Lean 4 Core & Python Quantizer
+  lean-and-python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Initialize Lake Manifest
-        run: echo '{"version": "1.1.0", "packagesDir": ".lake/packages", "packages": []}' > lake-manifest.json
-
+      - uses: actions/checkout@v4
+      - run: printf '{"version":"1.1.0","packagesDir":".lake/packages","packages":[]}\n' > lake-manifest.json
       - uses: leanprover/lean-action@v1
         with:
           build: false
-
-      - name: Build Linked Lean 4 Certifier
-        run: |
+      - run: |
           lake update
           lake exe cache get
           lake build
           lake exe vcore_certifier --verify-bench
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install PyTorch CPU & Run Quantizer Benchmark
-        run: |
-          pip install --upgrade pip
+      - run: |
           pip install numpy safetensors torch --index-url https://pytorch.org
           pip install -e . --no-deps
           python test_quantizer.py
 
-  build-cuda-engine:
-    name: Build Native CUDA Library (libvcore_engine.so)
+  cuda-build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Free Disk Space
-        run: |
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo apt-get clean
-
-      - name: Install CUDA Toolkit 12.1
-        uses: Jimver/cuda-toolkit@v0.2.16
+      - uses: actions/checkout@v4
+      - uses: Jimver/cuda-toolkit@v0.2.16
         with:
           cuda: "12.1.0"
           method: "network"
-
-      - name: Configure & Build libvcore_engine.so
-        run: |
-          cmake -S . -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89"
+      - run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89"
           cmake --build build --config Release -j $(nproc)
-
-      - name: Upload Compiled CUDA Engine Artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: libvcore_engine-linux-cuda12
+          name: libvcore_engine
           path: build/libvcore_engine.so
           
