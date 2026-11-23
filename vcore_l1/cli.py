@@ -3,31 +3,45 @@
 
 import argparse
 import os
-from .safetensors_quantizer import repack_safetensors_layerwise, repack_sharded_model
+from .safetensors_quantizer import (
+    repack_safetensors_layerwise,
+    repack_sharded_model,
+    repack_hf_hub_model,
+)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="V-CORE L1-Certified: 1.58-bit (Delta=1) Safetensors & Sharded Model Packer"
+        description="V-CORE L1-Certified: 1.58-bit (Delta=1) Safetensors, Sharded & HF Hub Model Packer"
     )
-    parser.add_argument("--input", "-i", required=True, help="Путь к файлу .safetensors или папке модели Hugging Face")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--input", "-i", help="Локальный файл .safetensors или папка модели")
+    group.add_argument("--hf-repo", help="ID репозитория Hugging Face (например, Qwen/Qwen2.5-1.5B)")
+
     parser.add_argument("--output", "-o", required=True, help="Путь к выходному файлу или папке")
-    parser.add_argument("--group-size", "-g", type=int, default=32, help="Размер развязанного блока Delta=1 (по умолчанию 32)")
+    parser.add_argument("--group-size", "-g", type=int, default=64, help="Начальный размер блока каскада (64 -> 32 -> 16)")
     parser.add_argument("--theta", type=float, default=1e-4, help="Базовый порог шума Фильтра Маркова")
     parser.add_argument("--max-rel-error", type=float, default=0.40, help="Порог относительной L1-ошибки для Auto-Rollback")
-    parser.add_argument("--no-auto-theta", action="store_true", help="Отключить поблочный автоподбор порога theta_b*")
+    parser.add_argument("--token", default=None, help="Токен Hugging Face (для закрытых моделей)")
 
     args = parser.parse_args()
-    auto_theta = not args.no_auto_theta
 
-    if os.path.isdir(args.input):
+    if args.hf_repo:
+        stats = repack_hf_hub_model(
+            repo_id=args.hf_repo,
+            output_dir=args.output,
+            group_size=args.group_size,
+            theta=args.theta,
+            max_rel_error=args.max_rel_error,
+            token=args.token,
+        )
+    elif os.path.isdir(args.input):
         stats = repack_sharded_model(
             args.input,
             args.output,
             group_size=args.group_size,
             theta=args.theta,
             max_rel_error=args.max_rel_error,
-            auto_theta=auto_theta,
         )
     else:
         stats = repack_safetensors_layerwise(
@@ -36,7 +50,6 @@ def main():
             group_size=args.group_size,
             theta=args.theta,
             max_rel_error=args.max_rel_error,
-            auto_theta=auto_theta,
         )
 
     print("=== V-CORE L1-CERTIFIED COMPRESSION REPORT ===")
@@ -49,3 +62,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
