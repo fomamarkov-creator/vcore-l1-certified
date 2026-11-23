@@ -212,4 +212,18 @@ def load_vcore_causal_lm(model_dir: str, device: str = "cpu", dtype: torch.dtype
 
     model = inject_vcore_layers(model, merged_sd)
     return model.to(device=device, dtype=dtype).eval()
-    
+
+class VCoreModelForCausalLM:
+    """
+    Удобная обёртка в стиле Hugging Face transformers:
+    позволяет загружать сжатую модель одной строкой
+    `model = VCoreModelForCausalLM.from_vcore_pretrained("./model_vcore_158bit", device="cuda")`
+    """
+    @staticmethod
+    def from_vcore_pretrained(
+        model_dir: str,
+        device: str = "cpu",
+        dtype: torch.dtype = torch.float16,
+    ):
+        return load_vcore_causal_lm(model_dir=model_dir, device=device, dtype=dtype)
+        
