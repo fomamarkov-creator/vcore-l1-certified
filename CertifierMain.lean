@@ -24,9 +24,9 @@ def main (args : List String) : IO Unit := do
       IO.println s!"[V-CORE 1.58-Bit Ternary (m=6)] theta*={θ_star} | alpha*={α_star} | exact_L1_err={err_star} (certified_optimal=true)"
       let wEntries : List WeightedEntryQ := [⟨1/10, 1⟩, ⟨-1/10, 1⟩, ⟨4, 10⟩, ⟨-4, 10⟩, ⟨20, 1⟩]
       let (wθ, wα) := quantizeWeightedTernaryExactQ wEntries
-      IO.println s!"[V-CORE Activation-Weighted 1.58-Bit] theta*={wθ} | alpha*={wα} (certified_optimal=true)"
-      let fptCost := solveChainOverlapFPT [-4, 0, 4] [4, 0, 4, 0]
+      let fptCost := solveChainOverlapFPT [-4, 0, 4] [4, 8, 4]
       IO.println s!"[V-CORE Bounded-Treewidth (Δ=2) FPT] min_L1_cost={fptCost} (certified_dp=true)"
+
   | _ =>
       IO.println "V-CORE Certified Lean 4 Bridge (linked to l1-projection-complexity-lean4 v3.0.0)"
       IO.println "Usage: lake exe vcore_certifier --verify-bench"
