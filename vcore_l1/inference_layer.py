@@ -96,7 +96,7 @@ class VCoreDynamicCache:
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if layer_idx == 0:
-            self._seen_tokens += key_states.shape[-2]
+            self._seen_tokens += key_states.size(-2)
 
         if len(self.key_cache) <= layer_idx:
             self.key_cache.append((*self.kv_q.compress_kv(key_states), key_states.dtype))
@@ -114,7 +114,7 @@ class VCoreDynamicCache:
 
     def get_seq_length(self, layer_idx: int = 0) -> int:
         return self._seen_tokens
-class VCoreLinear(nn.Module):
+        class VCoreLinear(nn.Module):
     """Drop-in замена для nn.Linear (2-bit / 4-bit + Δ=1 перестановка каналов с выбросами)."""
     def __init__(
         self,
@@ -180,7 +180,7 @@ class VCoreLinear(nn.Module):
         x_2d = x.reshape(-1, self.in_features)
         if self.vcore_perm is not None:
             x_2d = x_2d[:, self.vcore_perm]
-        batch_tokens = x_2d.shape
+        batch_tokens = x_2d.size(0)
 
         if (
             self.bits == 2
@@ -229,7 +229,7 @@ def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -
             if packed_key in state_dict:
                 packed = state_dict[packed_key]
                 scales = state_dict[f"{w_key}.vcore_scales"]
-                shape = tuple(state_dict[f"{w_key}.vcore_shape"].tolist())
+                out_f, in_f = map(int, state_dict[f"{w_key}.vcore_shape"].tolist())
                 g_size = int(state_dict[f"{w_key}.vcore_group"].item())
                 bits = int(state_dict[f"{w_key}.vcore_bits"].item()) if f"{w_key}.vcore_bits" in state_dict else 2
                 perm = state_dict.get(f"{w_key}.vcore_perm", None)
@@ -238,7 +238,7 @@ def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -
                 vcore_layer = VCoreLinear.from_packed_tensors(
                     packed=packed,
                     scales=scales,
-                    shape=(shape, shape),
+                    shape=(out_f, in_f),
                     group_size=g_size,
                     bits=bits,
                     bias=bias_tensor,
