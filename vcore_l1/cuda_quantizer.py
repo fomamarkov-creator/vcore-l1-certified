@@ -7,11 +7,6 @@ import torch.nn as nn
 
 
 class VCoreTernaryQuantizer(nn.Module):
-    """
-    Улучшенный гибридный 1.58-bit квантователь {-1, 0, +1}:
-    1. Автоматический подбор оптимального порога шума theta_b* для КАЖДОГО блока.
-    2. Оптимальное Δ = 1 медианное масштабирование ненулевых весов блока.
-    """
     def __init__(self, group_size: int = 32, theta: float = 1e-4, auto_theta: bool = True):
         super().__init__()
         self.group_size = group_size
@@ -68,7 +63,6 @@ class VCoreTernaryQuantizer(nn.Module):
 
 
 def verify_with_lean4_engine() -> str:
-    """Вызывает скомпилированный сертификатор Lean 4 из связанного репозитория."""
     res = subprocess.run(
         ["lake", "exe", "vcore_certifier", "--verify-bench"],
         capture_output=True,
