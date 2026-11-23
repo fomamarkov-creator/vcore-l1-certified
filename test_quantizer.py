@@ -1,5 +1,13 @@
+import os
+import tempfile
 import torch
-from vcore_l1 import VCoreTernaryQuantizer, verify_with_lean4_engine
+from safetensors.torch import save_file, load_file
+from vcore_l1 import (
+    VCoreTernaryQuantizer,
+    verify_with_lean4_engine,
+    repack_safetensors_layerwise,
+    unpack_uint8_to_ternary,
+)
 
 
 def absmean_bitnet_quantize(weights: torch.Tensor) -> torch.Tensor:
@@ -17,20 +25,16 @@ def main():
     lean_out = verify_with_lean4_engine()
     print(lean_out.strip())
 
-    print("\n=== 2. Сравнительный бенчмарк на матрице слоя нейросети (128 x 256) с выбросами ===")
+    print("\n=== 2. Сравнительный бенчмарк на матрице (128 x 256) с выбросами ===")
     torch.manual_seed(42)
     weights = torch.randn(128, 256) * 0.05
-    # Добавляем 0.5% тяжелых выбросов (характерных для весов LLM)
     outlier_mask = torch.rand_like(weights) < 0.005
     weights[outlier_mask] *= 40.0
 
     orig_l1 = torch.sum(torch.abs(weights)).item()
-
-    # Метод 1: Стандартный BitNet absmean
     w_bitnet = absmean_bitnet_quantize(weights)
     err_bitnet = torch.sum(torch.abs(weights - w_bitnet)).item()
 
-    # Метод 2: Ваш гибридный V-CORE (LinearSelector + медиана блока Δ = 1)
     quantizer = VCoreTernaryQuantizer(group_size=32, theta=1e-4)
     w_vcore, mask, scales = quantizer.quantize(weights)
     err_vcore = torch.sum(torch.abs(weights - w_vcore)).item()
@@ -40,8 +44,36 @@ def main():
     print(f"Ошибка BitNet (absmean)       : {err_bitnet:.2f}")
     print(f"Ошибка V-CORE (Delta=1 Med)   : {err_vcore:.2f} (снижение ошибки на {reduction:.1f}%)")
     assert err_vcore < err_bitnet, "V-CORE должен давать меньшую L1-ошибку, чем absmean!"
-    print("[OK] Все проверки успешно пройдены.")
+
+    print("\n=== 3. Тест послойной переупаковки модели (.safetensors -> 2-bit uint8) ===")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        in_file = os.path.join(tmpdir, "model_fp16.safetensors")
+        out_file = os.path.join(tmpdir, "model_vcore_158bit.safetensors")
+
+        # Создаём тестовый многослойный чекпоинт (2 рабочих линейных слоя + 1 LayerNorm)
+        dummy_model = {
+            "model.layers.0.self_attn.q_proj.weight": torch.randn(256, 512, dtype=torch.float16),
+            "model.layers.0.mlp.gate_proj.weight": torch.randn(512, 512, dtype=torch.float16),
+            "model.layers.0.input_layernorm.weight": torch.ones(512, dtype=torch.float16),
+        }
+        save_file(dummy_model, in_file)
+
+        stats = repack_safetensors_layerwise(in_file, out_file, group_size=32, theta=1e-4)
+        print(f"Квантовано слоёв  : {stats['quantized_layers']}")
+        print(f"Размер до/после   : {stats['orig_size_mb']:.2f} MB -> {stats['packed_size_mb']:.2f} MB (сжатие в {stats['compression_ratio']:.1f}x)")
+
+        # Проверяем обратную распаковку первого слоя
+        packed_dict = load_file(out_file)
+        unpacked_mask = unpack_uint8_to_ternary(
+            packed_dict["model.layers.0.self_attn.q_proj.weight.vcore_packed"],
+            tuple(packed_dict["model.layers.0.self_attn.q_proj.weight.vcore_shape"].tolist()),
+        )
+        assert unpacked_mask.shape == (256, 512)
+        assert "model.layers.0.input_layernorm.weight" in packed_dict
+
+    print("[OK] Все тесты Lean 4, PyTorch и Safetensors успешно пройдены!")
 
 
 if __name__ == "__main__":
     main()
+    
