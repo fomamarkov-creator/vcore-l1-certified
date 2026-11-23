@@ -21,7 +21,7 @@ def absmean_bitnet_quantize(weights: torch.Tensor) -> torch.Tensor:
 
 
 def main():
-    print("=== 1. Проверка математического ядра Lean 4 (v2.0.0) ===")
+    print("=== 1. Проверка математического ядра Lean 4 (v2.1.0) ===")
     print(verify_with_lean4_engine().strip())
 
     print("\n=== 2. Сравнение с BitNet (absmean) при автоподборе theta_b* ===")
@@ -45,7 +45,6 @@ def main():
             def __init__(self):
                 super().__init__()
                 self.fc1 = nn.Linear(128, 64, bias=False)
-                # Второй слой с равномерной сеткой хорошо укладывается в INT4, но не в 1.58-bit при строгом пороге
                 self.fc2 = nn.Linear(64, 32, bias=False)
 
             def forward(self, x):
@@ -64,13 +63,13 @@ def main():
 
         packed_sd = load_file(os.path.join(out_dir, "model.safetensors"))
         inject_vcore_layers(net, packed_sd)
+        assert isinstance(net.fc1, VCoreLinear)
         assert isinstance(net.fc2, VCoreLinear)
-        assert net.fc2.bits == 4  # Сработал промежуточный INT4-каскад!
+        assert {net.fc1.bits, net.fc2.bits} == {2, 4}
 
         y_out = net(torch.randn(4, 128, dtype=torch.float16))
         assert y_out.shape == (4, 32)
 
-    # Тест VCoreDynamicCache (2 шага авторегрессии)
     cache = VCoreDynamicCache(group_size=32)
     k1, v1 = torch.randn(1, 4, 8, 64), torch.randn(1, 4, 8, 64)
     k2, v2 = torch.randn(1, 4, 1, 64), torch.randn(1, 4, 1, 64)
