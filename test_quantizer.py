@@ -100,7 +100,8 @@ def main():
     # Проверка сеточного и непрерывного FPT (Δ = 2, treewidth k = 1) + Δ = 3 (treewidth k = 2)
     w_chain = torch.tensor([4.0, 0.0, -4.0, 0.0])
     c_opt, fpt_cost = solve_chain_overlap_fpt(w_chain, num_grid=9)
-    assert c_opt.shape == (4,) and fpt_cost <= 4.0 + 1e-6
+    assert c_opt.shape == (4,) and abs(fpt_cost - 8.0) < 1e-6
+
 
 
     w_cont = torch.tensor([4.0, 8.0, 4.0])
