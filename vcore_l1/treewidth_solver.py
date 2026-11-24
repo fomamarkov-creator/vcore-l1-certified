@@ -11,10 +11,6 @@ def solve_chain_overlap_fpt(
     grid: Optional[torch.Tensor] = None,
     num_grid: int = 17,
 ) -> Tuple[torch.Tensor, float]:
-    """
-    Полиномиальный FPT-решатель O(m * |G|^2) для Δ = 2 ленточных перекрытий
-    по дискретной сетке G (MarkovL1TreewidthSolver.lean).
-    """
     w_1d = w.reshape(-1).to(torch.float32)
     m = w_1d.numel()
     device = w_1d.device
@@ -31,7 +27,7 @@ def solve_chain_overlap_fpt(
 
     g_size = grid_1d.numel()
     if m == 1:
-        errs = torch.abs(w_1d[0] - grid_1d)
+        errs = torch.abs(w_1d - grid_1d)
         best_idx = int(torch.argmin(errs).item())
         return grid_1d[best_idx : best_idx + 1], float(errs[best_idx].item())
 
@@ -39,10 +35,10 @@ def solve_chain_overlap_fpt(
     backpointers = torch.zeros((m - 1, g_size), device=device, dtype=torch.int64)
 
     for i in range(m - 1):
-        node_cost = torch.abs(w_1d[i] - grid_1d)  # (G,)
-        pair_sums = grid_1d.unsqueeze(1) + grid_1d.unsqueeze(0)  # (G, G)
-        edge_cost = torch.abs(w_1d[i + 1] - pair_sums)  # (G, G)
-        total = (dp + node_cost).unsqueeze(1) + edge_cost  # (G, G)
+        node_cost = torch.abs(w_1d[i] - grid_1d)
+        pair_sums = grid_1d.unsqueeze(1) + grid_1d.unsqueeze(0)
+        edge_cost = torch.abs(w_1d[i + 1] - pair_sums)
+        total = (dp + node_cost).unsqueeze(1) + edge_cost
         dp, backpointers[i] = torch.min(total, dim=0)
 
     final_total = dp + torch.abs(w_1d[m - 1] - grid_1d)
@@ -60,18 +56,12 @@ def solve_chain_overlap_fpt(
 
 
 def solve_continuous_chain_dp(w: torch.Tensor) -> Tuple[torch.Tensor, float]:
-    """
-    Точный непрерывный решатель для цепочек перекрытий Δ = 2 (treewidth k = 1)
-    без дискретной сетки (реализация `MarkovL1ContinuousChainDP.lean`):
-    вычисляет глобальный минимум Φ(c) = sum_{i=1}^{m-1} (|w_i - c_i| + |w_{i+1} - (c_i + c_{i+1})|) + |w_m - c_m|
-    по всему непрерывному пространству R^m через клиппирование наклонов PWL-функции.
-    """
     ws: List[float] = [float(x) for x in w.detach().cpu().reshape(-1).tolist()]
     m = len(ws)
     if m == 0:
         return torch.empty(0, dtype=w.dtype, device=w.device), 0.0
     if m == 1:
-        return torch.tensor([ws[0]], dtype=w.dtype, device=w.device), 0.0
+        return torch.tensor(ws, dtype=w.dtype, device=w.device), 0.0
 
     def pwl_eval(val0: float, left_s: float, breaks: List[Tuple[float, float]], z: float) -> float:
         def raw(t: float) -> float:
@@ -143,7 +133,8 @@ def solve_continuous_chain_dp(w: torch.Tensor) -> Tuple[torch.Tensor, float]:
         dp = pwl_reflect_shift(*h_conv, ws[i + 1])
 
     final_dp = pwl_add_abs(*dp, ws[-1])
-    c_curr = pwl_argmin(final_dp[1], final_dp[2])
+    _, fin_left, fin_breaks = final_dp
+    c_curr = pwl_argmin(fin_left, fin_breaks)
     min_cost = pwl_eval(*final_dp, c_curr)
 
     cs = [0.0] * m
@@ -152,20 +143,17 @@ def solve_continuous_chain_dp(w: torch.Tensor) -> Tuple[torch.Tensor, float]:
         f_node, w_next = history[i]
         target = w_next - cs[i + 1]
         f_tot = pwl_add_abs(*f_node, target)
-        cs[i] = pwl_argmin(f_tot[1], f_tot[2])
+        _, tot_left, tot_breaks = f_tot
+        cs[i] = pwl_argmin(tot_left, tot_breaks)
 
     return torch.tensor(cs, dtype=w.dtype, device=w.device), float(min_cost)
-    @torch.no_grad()
+
+@torch.no_grad()
 def solve_triple_overlap_fpt(
     w: torch.Tensor,
     grid: Optional[torch.Tensor] = None,
     num_grid: int = 9,
 ) -> Tuple[torch.Tensor, float]:
-    """
-    Точный полиномиальный FPT-решатель O(m * |G|^3) для графов перекрытий степени Δ = 3
-    (древесная ширина treewidth k = 2, модуль `MarkovL1GeneralTreewidthFPT.lean`),
-    моделирующий совместное квантование троек связанных проекций (W_Q, W_K, W_V).
-    """
     w_1d = w.reshape(-1).to(torch.float32)
     m = w_1d.numel()
     device = w_1d.device
@@ -184,11 +172,9 @@ def solve_triple_overlap_fpt(
     if m <= 2:
         return solve_chain_overlap_fpt(w_1d, grid=grid_1d)
 
-    # dp[idx_prev2, idx_prev1] хранит минимальную стоимость префикса до пары (c_{i-2}, c_{i-1})
     dp = torch.zeros((g_size, g_size), device=device, dtype=torch.float32)
     backpointers = torch.zeros((m - 2, g_size, g_size), device=device, dtype=torch.int64)
 
-    # Предвычисляем сетку сумм c_a + c_b + c_c формы (G, G, G)
     triple_sums = (
         grid_1d.view(g_size, 1, 1)
         + grid_1d.view(1, g_size, 1)
@@ -196,12 +182,11 @@ def solve_triple_overlap_fpt(
     )
 
     for i in range(m - 2):
-        node_cost = torch.abs(w_1d[i] - grid_1d).view(g_size, 1, 1)  # (G, 1, 1)
-        edge_cost = torch.abs(w_1d[i + 2] - triple_sums)  # (G, G, G)
-        total = dp.unsqueeze(2) + node_cost + edge_cost  # (G, G, G)
+        node_cost = torch.abs(w_1d[i] - grid_1d).view(g_size, 1, 1)
+        edge_cost = torch.abs(w_1d[i + 2] - triple_sums)
+        total = dp.unsqueeze(2) + node_cost + edge_cost
         dp, backpointers[i] = torch.min(total, dim=0)
 
-    # Добавляем краевые локальные стоимости для последних двух координат w_{m-2}, w_{m-1}
     end_cost = (
         dp
         + torch.abs(w_1d[m - 2] - grid_1d).unsqueeze(1)
