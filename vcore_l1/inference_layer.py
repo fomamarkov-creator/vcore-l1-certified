@@ -238,11 +238,11 @@ class VCoreLinear(nn.Module):
             layer.bias.copy_(bias.to(torch.float16))
         return layer
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-        orig_shape = x.shape
-        x_2d = x.reshape(-1, self.in_features)
-        if self.vcore_perm is not None:
-            x_2d = x_2d[:, self.vcore_perm]
-        batch_tokens = x_2d.size(0)
+            orig_shape = x.shape
+            x_2d = x.reshape(-1, self.in_features)
+            if self.vcore_perm is not None:
+                x_2d = x_2d[:, self.vcore_perm]
+            batch_tokens = x_2d.size(0)
 
         # 1. Быстрый путь на GPU (CUDA Warp GEMV / Shared-Memory Tiled GEMM)
         if (
