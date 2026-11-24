@@ -2,6 +2,7 @@ from .cuda_quantizer import VCoreTernaryQuantizer, verify_with_lean4_engine
 from .matrix_generator import generate_markov_q
 from .treewidth_solver import solve_chain_overlap_fpt
 from .calibration import collect_activation_importance
+from .gguf_exporter import export_vcore_to_gguf
 from .inference_layer import (
     VCoreLinear,
     VCoreKVCacheQuantizer,
@@ -20,13 +21,14 @@ from .safetensors_quantizer import (
     repack_hf_hub_model,
 )
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __all__ = [
     "VCoreTernaryQuantizer",
     "verify_with_lean4_engine",
     "generate_markov_q",
     "solve_chain_overlap_fpt",
     "collect_activation_importance",
+    "export_vcore_to_gguf",
     "VCoreLinear",
     "VCoreKVCacheQuantizer",
     "VCoreDynamicCache",
