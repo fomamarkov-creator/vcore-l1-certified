@@ -1,9 +1,9 @@
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
-# **Lean Core:** `l1-projection-complexity-lean4` (`v4.0.0` — 12 Verified Modules) 
-# **Toolchain:** Lean `v4.37.0-rc1` 
-# **Backend:** PyTorch / Warp-CUDA (`sm_70`–`sm_90`) 
-# **License:** AGPL-3.0
+* **Lean Core:** `l1-projection-complexity-lean4` (`v4.0.0` — 12 Verified Modules) 
+* **Toolchain:** Lean `v4.37.0-rc1` 
+* **Backend:** PyTorch / Warp-CUDA (`sm_70`–`sm_90`) 
+* **License:** AGPL-3.0
 
 # V-CORE (ℓ₁)-Certified: Hybrid Lean 4 + GPU 1.58-Bit & INT4 Quantization & Inference Engine
 
@@ -32,6 +32,7 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
    * Runs `vcore_fused_ternary_gemv_warp for single-token decoding and shared-memory tiled uint32 vcore_fused_ternary_gemm_tiled for long-context prefill` (32-thread warp reduction with `__shfl_down_sync` and 32-bit `uint32` register loads) directly on 2-bit packed `uint8` weights without unpacking to `float32` in VRAM (`sm_70`–`sm_90`).
 
 ---
+![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
 
 
 
