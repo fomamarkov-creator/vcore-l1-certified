@@ -4,6 +4,7 @@
 import argparse
 import os
 from .calibration import collect_activation_importance
+from .gguf_exporter import export_vcore_to_gguf
 from .safetensors_quantizer import (
     repack_safetensors_layerwise,
     repack_sharded_model,
@@ -25,6 +26,7 @@ def main():
     parser.add_argument("--max-rel-error", type=float, default=0.40, help="Порог относительной L1-ошибки")
     parser.add_argument("--target-vram-gb", type=float, default=None, help="Целевой бюджет видеопамяти в ГБ")
     parser.add_argument("--calib-samples", type=int, default=0, help="Число примеров для сбора активаций E[|x_j|] (0 = Data-Free)")
+    parser.add_argument("--export-gguf", default=None, help="Сразу экспортировать сжатую модель в .gguf (для llama.cpp / Ollama)")
     parser.add_argument("--token", default=None, help="Токен Hugging Face")
 
     args = parser.parse_args()
@@ -74,7 +76,17 @@ def main():
         else:
             print(f"  {k:<24}: {v}")
 
+    if args.export_gguf:
+        if not os.path.isdir(args.output):
+            raise ValueError("Для экспорта в GGUF укажите выходную директорию модели в --output")
+        g_stats = export_vcore_to_gguf(args.output, args.export_gguf)
+        size_mb = os.path.getsize(args.export_gguf) / (1024 * 1024)
+        print("=== V-CORE GGUF EXPORT REPORT ===")
+        print(f"  output_file   : {args.export_gguf} ({size_mb:.2f} MB)")
+        for k, v in g_stats.items():
+            print(f"  {k:<14}: {v}")
+
 
 if __name__ == "__main__":
     main()
-    
+        
