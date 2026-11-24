@@ -163,6 +163,7 @@ def export_vcore_to_gguf(
     output_gguf: str,
     quant_mode: str = "auto",
 ) -> Dict[str, int]:
+    import gc
     import gguf
 
     cfg_path = os.path.join(model_dir, "config.json")
@@ -183,7 +184,7 @@ def export_vcore_to_gguf(
     arch = arch_map.get(model_type, model_type)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_gguf)), exist_ok=True)
-    writer = gguf.GGUFWriter(output_gguf, arch)
+    writer = gguf.GGUFWriter(output_gguf, arch, use_temp_file=True)
 
     writer.add_name(os.path.basename(os.path.abspath(model_dir)))
     writer.add_file_type(gguf.LlamaFileType.MOSTLY_Q4_0)
@@ -205,68 +206,76 @@ def export_vcore_to_gguf(
     if not shard_files:
         raise FileNotFoundError(f"В папке {model_dir} не найдены файлы .safetensors")
 
-    merged_sd: Dict[str, torch.Tensor] = {}
-    for sf in shard_files:
-        merged_sd.update(load_file(sf))
-
-    vcore_bases = sorted({k.split(".vcore_") [0] for k in merged_sd.keys() if ".vcore_" in k})
-    plain_keys = sorted([k for k in merged_sd.keys() if ".vcore_" not in k])
-
     stats = {"tq2_0_tensors": 0, "q4_0_tensors": 0, "f16_tensors": 0}
-    total = len(vcore_bases) + len(plain_keys)
-    step = 0
+    has_output_weight = False
+    embed_for_tie = None
 
-    for base_k in vcore_bases:
-        step += 1
-        g_name = _map_hf_to_gguf_name(base_k, arch)
-        if g_name is None:
-            continue
-        print(f"\r[V-CORE -> GGUF] [{step}/{total}] {g_name:<42}", end="", flush=True)
+    for s_idx, sf in enumerate(shard_files, 1):
+        shard_sd = load_file(sf)
+        vcore_bases = sorted({k.split(".vcore_")[0] for k in shard_sd.keys() if ".vcore_" in k})
+        plain_keys = sorted([k for k in shard_sd.keys() if ".vcore_" not in k])
+        total = len(vcore_bases) + len(plain_keys)
+        step = 0
 
-        w_fp32, bits, has_perm = _restore_vcore_tensor_to_fp32(merged_sd, base_k)
-        g_size = int(merged_sd[f"{base_k}.vcore_group"].item())
-
-        if (
-            quant_mode in ("auto", "tq2_0")
-            and bits == 2
-            and not has_perm
-            and g_size == 256
-            and hasattr(gguf.GGMLQuantizationType, "TQ2_0")
-        ):
-            packed = merged_sd[f"{base_k}.vcore_packed"]
-            scales = merged_sd[f"{base_k}.vcore_scales"].numpy().astype(np.float16)
-            shape = tuple(map(int, merged_sd[f"{base_k}.vcore_shape"].tolist()))
-            grid_np = unpack_uint8_to_ternary(packed, shape).numpy()
-            tq2_raw = _pack_tq2_0_numpy(grid_np, scales, g_size)
-            if tq2_raw is not None:
-                writer.add_tensor(g_name, tq2_raw, raw_dtype=gguf.GGMLQuantizationType.TQ2_0)
-                stats["tq2_0_tensors"] += 1
+        for base_k in vcore_bases:
+            step += 1
+            g_name = _map_hf_to_gguf_name(base_k, arch)
+            if g_name is None:
                 continue
+            if g_name == "output.weight":
+                has_output_weight = True
+            print(f"\r[V-CORE -> GGUF] Shard {s_idx}/{len(shard_files)} [{step}/{total}] {g_name:<36}", end="", flush=True)
 
-        if quant_mode != "f16" and w_fp32.ndim == 2 and (w_fp32.shape[1] % 32 == 0):
-            q_data = gguf.quants.quantize(w_fp32, gguf.GGMLQuantizationType.Q4_0)
-            writer.add_tensor(g_name, q_data, raw_dtype=gguf.GGMLQuantizationType.Q4_0)
-            stats["q4_0_tensors"] += 1
-        else:
-            writer.add_tensor(g_name, w_fp32.astype(np.float16), raw_dtype=gguf.GGMLQuantizationType.F16)
+            w_fp32, bits, has_perm = _restore_vcore_tensor_to_fp32(shard_sd, base_k)
+            g_size = int(shard_sd[f"{base_k}.vcore_group"].item())
+
+            if (
+                quant_mode in ("auto", "tq2_0")
+                and bits == 2
+                and not has_perm
+                and g_size == 256
+                and hasattr(gguf.GGMLQuantizationType, "TQ2_0")
+            ):
+                packed = shard_sd[f"{base_k}.vcore_packed"]
+                scales = shard_sd[f"{base_k}.vcore_scales"].numpy().astype(np.float16)
+                shape = tuple(map(int, shard_sd[f"{base_k}.vcore_shape"].tolist()))
+                grid_np = unpack_uint8_to_ternary(packed, shape).numpy()
+                tq2_raw = _pack_tq2_0_numpy(grid_np, scales, g_size)
+                if tq2_raw is not None:
+                    writer.add_tensor(g_name, tq2_raw, raw_dtype=gguf.GGMLQuantizationType.TQ2_0)
+                    stats["tq2_0_tensors"] += 1
+                    continue
+
+            if quant_mode != "f16" and w_fp32.ndim == 2 and (w_fp32.shape[1] % 32 == 0):
+                q_data = gguf.quants.quantize(w_fp32, gguf.GGMLQuantizationType.Q4_0)
+                writer.add_tensor(g_name, q_data, raw_dtype=gguf.GGMLQuantizationType.Q4_0)
+                stats["q4_0_tensors"] += 1
+            else:
+                writer.add_tensor(g_name, w_fp32.astype(np.float16), raw_dtype=gguf.GGMLQuantizationType.F16)
+                stats["f16_tensors"] += 1
+
+        for pk in plain_keys:
+            step += 1
+            g_name = _map_hf_to_gguf_name(pk, arch)
+            if g_name is None:
+                continue
+            if g_name == "output.weight":
+                has_output_weight = True
+            print(f"\r[V-CORE -> GGUF] Shard {s_idx}/{len(shard_files)} [{step}/{total}] {g_name:<36}", end="", flush=True)
+            arr = shard_sd[pk].to(torch.float32).cpu().numpy()
+            if pk == "model.embed_tokens.weight":
+                embed_for_tie = arr.astype(np.float16)
+            if arr.ndim == 1:
+                writer.add_tensor(g_name, arr.astype(np.float32), raw_dtype=gguf.GGMLQuantizationType.F32)
+            else:
+                writer.add_tensor(g_name, arr.astype(np.float16), raw_dtype=gguf.GGMLQuantizationType.F16)
             stats["f16_tensors"] += 1
 
-    for pk in plain_keys:
-        step += 1
-        g_name = _map_hf_to_gguf_name(pk, arch)
-        if g_name is None:
-            continue
-        print(f"\r[V-CORE -> GGUF] [{step}/{total}] {g_name:<42}", end="", flush=True)
-        arr = merged_sd[pk].to(torch.float32).cpu().numpy()
-        if arr.ndim == 1:
-            writer.add_tensor(g_name, arr.astype(np.float32), raw_dtype=gguf.GGMLQuantizationType.F32)
-        else:
-            writer.add_tensor(g_name, arr.astype(np.float16), raw_dtype=gguf.GGMLQuantizationType.F16)
-        stats["f16_tensors"] += 1
+        shard_sd.clear()
+        gc.collect()
 
-    if "output.weight" not in [_map_hf_to_gguf_name(k, arch) for k in plain_keys] and "model.embed_tokens.weight" in merged_sd:
-        emb = merged_sd["model.embed_tokens.weight"].to(torch.float16).cpu().numpy()
-        writer.add_tensor("output.weight", emb, raw_dtype=gguf.GGMLQuantizationType.F16)
+    if not has_output_weight and embed_for_tie is not None:
+        writer.add_tensor("output.weight", embed_for_tie, raw_dtype=gguf.GGMLQuantizationType.F16)
         stats["f16_tensors"] += 1
 
     print(flush=True)
@@ -275,6 +284,8 @@ def export_vcore_to_gguf(
     writer.write_tensors_to_file()
     writer.close()
     return stats
+
+
 
 
 def main():
