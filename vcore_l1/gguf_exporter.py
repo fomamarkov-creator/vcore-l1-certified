@@ -25,7 +25,7 @@ def _map_hf_to_gguf_name(hf_name: str, arch: str) -> Optional[str]:
 
     if hf_name.startswith("model.layers."):
         parts = hf_name.split(".")
-        layer_id = parts
+        layer_id = parts [2]
         rest = ".".join(parts[3:])
         mapping = {
             "input_layernorm.weight": f"blk.{layer_id}.attn_norm.weight",
@@ -120,7 +120,7 @@ def _load_hf_tokenizer_to_gguf(writer, model_dir: str, target_vocab_size: int = 
     max_id = max(max(full_vocab.values()), target_vocab_size - 1)
     tokens = [f"<|extra_{i}|>" for i in range(max_id + 1)]
     scores = [0.0] * (max_id + 1)
-    token_types = * (max_id + 1)
+    token_types = [1] * (max_id + 1)
 
     added_ids = set(added.values())
     for tok_str, tid in full_vocab.items():
@@ -209,7 +209,7 @@ def export_vcore_to_gguf(
     for sf in shard_files:
         merged_sd.update(load_file(sf))
 
-    vcore_bases = sorted({k.split(".vcore_") for k in merged_sd.keys() if ".vcore_" in k})
+    vcore_bases = sorted({k.split(".vcore_") [0] for k in merged_sd.keys() if ".vcore_" in k})
     plain_keys = sorted([k for k in merged_sd.keys() if ".vcore_" not in k])
 
     stats = {"tq2_0_tensors": 0, "q4_0_tensors": 0, "f16_tensors": 0}
@@ -243,7 +243,7 @@ def export_vcore_to_gguf(
                 stats["tq2_0_tensors"] += 1
                 continue
 
-        if quant_mode != "f16" and w_fp32.ndim == 2 and (w_fp32.shape % 32 == 0):
+        if quant_mode != "f16" and w_fp32.ndim == 2 and (w_fp32.shape[1] % 32 == 0):
             q_data = gguf.quants.quantize(w_fp32, gguf.GGMLQuantizationType.Q4_0)
             writer.add_tensor(g_name, q_data, raw_dtype=gguf.GGMLQuantizationType.Q4_0)
             stats["q4_0_tensors"] += 1
