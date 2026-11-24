@@ -154,7 +154,7 @@ class VCoreTerminalStudio:
             Layout(self.build_chat_panel(streaming_reply)),
         )
         return layout
-        def load_model(self, path: str) -> None:
+    def load_model(self, path: str) -> None:
         from transformers import AutoTokenizer
 
         if not os.path.exists(path):
