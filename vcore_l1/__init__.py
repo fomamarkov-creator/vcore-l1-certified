@@ -26,6 +26,8 @@ from .safetensors_quantizer import (
     repack_sharded_model,
     repack_hf_hub_model,
 )
+from .tui import VCoreTerminalStudio
+from .web_ui import run_web_server
 
 __version__ = "2.0.0"
 __all__ = [
@@ -52,4 +54,6 @@ __all__ = [
     "repack_safetensors_layerwise",
     "repack_sharded_model",
     "repack_hf_hub_model",
+    "VCoreTerminalStudio",
+    "run_web_server",
 ]
