@@ -556,3 +556,6 @@ int main(int argc, char** argv) {
     auto t_gen1 = std::chrono::high_resolution_clock::now();
     double gen_sec = std::chrono::duration<double>(t_gen1 - t_gen0).count();
     std::cout << "\n\n[vcore-run] Скорость нативного C++ AVX2: " << (gen_count / std::max(gen_sec, 1e-6))
+              << " токенов/сек (" << gen_count << " токенов за " << gen_sec << " с)\n";
+    return 0;
+}
