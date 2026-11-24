@@ -3,7 +3,7 @@
  * Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
  *
  * vcore-run: Standalone Zero-Dependency C++17 / AVX2 Inference Engine
- * Executes V-CORE 1.58-bit & INT4 Safetensors models directly via mmap.
+ * Executes V-CORE 1.58-bit & INT4 Safetensors models directly via mmap + BPE Tokenizer.
  */
 
 #include <stdint.h>
@@ -25,6 +25,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
 #include "vcore_tokenizer.hpp"
 
 extern "C" void vcore_cpu_fused_gemm(const uint8_t* W_packed,
@@ -36,7 +37,6 @@ extern "C" void vcore_cpu_fused_gemm(const uint8_t* W_packed,
                                      int in_features,
                                      int group_size);
 
-// Конвертация IEEE-754 float16 (uint16_t) -> float32
 static inline float fp16_to_fp32(uint16_t h) {
     uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
     uint32_t exp  = (h >> 10) & 0x1Fu;
@@ -64,7 +64,6 @@ static inline float fp16_to_fp32(uint16_t h) {
     return out;
 }
 
-// Конвертация bfloat16 (uint16_t) -> float32
 static inline float bf16_to_fp32(uint16_t b) {
     uint32_t f = (uint32_t)b << 16;
     float out;
@@ -267,8 +266,8 @@ struct NativeLinear {
             const auto& tv_gr = st.tensors[w_key + ".vcore_group"];
 
             const int64_t* sh = (const int64_t*)tv_sh.data;
-            out_features = (int)sh[0];
-            in_features = (int)sh[1];
+            out_features = (int)sh;
+            in_features = (int)sh;
             group_size = (int)(*(const int64_t*)tv_gr.data);
             bits = st.tensors.count(w_key + ".vcore_bits")
                    ? (int)(*(const int64_t*)st.tensors[w_key + ".vcore_bits"].data) : 2;
@@ -283,8 +282,8 @@ struct NativeLinear {
         } else if (st.tensors.count(w_key)) {
             is_packed = false;
             const auto& tv_w = st.tensors[w_key];
-            out_features = (int)tv_w.shape[0];
-            in_features = (int)tv_w.shape[1];
+            out_features = (int)tv_w.shape;
+            in_features = (int)tv_w.shape;
             weight_f32 = tensor_to_f32(tv_w);
         }
         if (st.tensors.count(prefix + ".bias")) {
@@ -355,13 +354,16 @@ struct TransformerLayer {
 
 int main(int argc, char** argv) {
     std::string model_dir;
+    std::string prompt_text;
     std::vector<int> prompt_ids = {151644, 8948, 198, 2610, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 3838, 374, 220, 17, 10, 17, 30, 151645, 198, 151644, 77091, 198};
-    int max_new_tokens = 32;
+    int max_new_tokens = 64;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if ((arg == "--model" || arg == "-m") && i + 1 < argc) {
             model_dir = argv[++i];
+        } else if ((arg == "--prompt" || arg == "-p") && i + 1 < argc) {
+            prompt_text = argv[++i];
         } else if ((arg == "--tokens" || arg == "-n") && i + 1 < argc) {
             max_new_tokens = std::stoi(argv[++i]);
         } else if (arg == "--prompt-ids" && i + 1 < argc) {
@@ -376,12 +378,18 @@ int main(int argc, char** argv) {
 
     if (model_dir.empty()) {
         std::cout << "V-CORE Native C++17 / AVX2 Standalone Runtime (vcore-run)\n"
-                  << "Usage: ./build/vcore-run --model <vcore_model_dir> [--tokens 32] [--prompt-ids 1,2,3]\n";
+                  << "Usage: ./build/vcore-run --model <vcore_model_dir> --prompt \"Hello!\" [--tokens 64]\n";
         return 0;
     }
 
     auto t_load0 = std::chrono::high_resolution_clock::now();
     ModelConfig cfg = load_config(model_dir);
+    VCoreBPETokenizer tokenizer;
+    bool has_tok = tokenizer.load(model_dir);
+    if (has_tok && !prompt_text.empty()) {
+        prompt_ids = tokenizer.encode_chat_prompt(prompt_text);
+    }
+
     SafetensorsLoader st;
     if (!st.load_dir(model_dir)) {
         std::cerr << "[ERROR] Не удалось загрузить .safetensors из: " << model_dir << "\n";
@@ -416,7 +424,7 @@ int main(int argc, char** argv) {
     auto t_load1 = std::chrono::high_resolution_clock::now();
     double load_ms = std::chrono::duration<double, std::milli>(t_load1 - t_load0).count();
     std::cout << "[vcore-run] Модель загружена через mmap за " << load_ms << " мс ("
-              << cfg.num_hidden_layers << " слоев, hidden=" << cfg.hidden_size << ")\n";
+              << cfg.num_hidden_layers << " слоев, BPE=" << (has_tok ? "OK" : "IDs") << ")\n";
 
     int head_dim = cfg.hidden_size / cfg.num_attention_heads;
     int kv_dim = cfg.num_key_value_heads * head_dim;
@@ -443,7 +451,6 @@ int main(int argc, char** argv) {
             layer.k_proj.forward(xb.data(), k.data());
             layer.v_proj.forward(xb.data(), v.data());
 
-            // RoPE (половинный сдвиг Qwen2 / Llama)
             for (int h = 0; h < cfg.num_attention_heads; ++h) {
                 float* qh = q.data() + h * head_dim;
                 for (int i = 0; i < head_dim / 2; ++i) {
@@ -501,7 +508,6 @@ int main(int argc, char** argv) {
             layer.o_proj.forward(att_out.data(), xb2.data());
             for (int i = 0; i < cfg.hidden_size; ++i) x[i] += xb2[i];
 
-            // SwiGLU MLP
             rms_norm(xb.data(), x.data(), layer.post_attention_layernorm.data(), cfg.hidden_size, cfg.rms_norm_eps);
             layer.gate_proj.forward(xb.data(), hb.data());
             layer.up_proj.forward(xb.data(), hb2.data());
@@ -518,7 +524,7 @@ int main(int argc, char** argv) {
         lm_head.forward(x.data(), logits.data());
 
         int best_id = 0;
-        float best_val = logits[0];
+        float best_val = logits;
         for (int i = 1; i < cfg.vocab_size; ++i) {
             if (logits[i] > best_val) {
                 best_val = logits[i];
@@ -529,23 +535,24 @@ int main(int argc, char** argv) {
     };
 
     int pos = 0;
-    int next_tok = prompt_ids[0];
+    int next_tok = prompt_ids;
     for (size_t i = 0; i < prompt_ids.size(); ++i) {
         next_tok = forward_token(prompt_ids[i], pos++);
     }
 
-    std::cout << "[vcore-run] Generated token IDs: " << next_tok;
+    std::cout << "\n[vcore-run] Ответ: ";
+    if (has_tok) std::cout << tokenizer.decode(next_tok) << std::flush;
+    else std::cout << next_tok << std::flush;
+
     auto t_gen0 = std::chrono::high_resolution_clock::now();
     int gen_count = 1;
     for (int step = 1; step < max_new_tokens; ++step) {
         next_tok = forward_token(next_tok, pos++);
-        std::cout << " " << next_tok << std::flush;
+        if (has_tok) std::cout << tokenizer.decode(next_tok) << std::flush;
+        else std::cout << " " << next_tok << std::flush;
         gen_count++;
-        if (next_tok == 151645 || next_tok == 2) break; // EOS
+        if (next_tok == 151645 || next_tok == 151643 || next_tok == 2) break;
     }
     auto t_gen1 = std::chrono::high_resolution_clock::now();
     double gen_sec = std::chrono::duration<double>(t_gen1 - t_gen0).count();
-    std::cout << "\n[vcore-run] Скорость нативного C++ AVX2: " << (gen_count / std::max(gen_sec, 1e-6))
-              << " токенов/сек (" << gen_count << " токенов за " << gen_sec << " с)\n";
-    return 0;
-}
+    std::cout << "\n\n[vcore-run] Скорость нативного C++ AVX2: " << (gen_count / std::max(gen_sec, 1e-6))
