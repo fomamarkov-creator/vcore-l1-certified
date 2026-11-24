@@ -58,6 +58,17 @@ Evaluated on real projection weights (`Qwen2.5-0.5B-Instruct`, `layers.0.mlp.gat
 | **Qwen/Qwen2.5-0.5B-Instruct** | 942.3 MB | **453.7 MB** | **2.08×** | 10.76% | Coherent (8.4 tok/s) |
 | **Qwen/Qwen2.5-1.5B-Instruct** | 2,944.4 MB | **1,152.3 MB** | **2.56×** | 10.63% | Coherent |
 
+### 4. Mathematical Fidelity & GGUF Evaluation (`Qwen/Qwen2.5-1.5B-Instruct`)
+
+Measured across all 151,936 vocabulary logits against the unquantized FP16 baseline (`2,944.4 MB` → `1,152.3 MB` V-CORE / `1,599.9 MB` GGUF):
+
+| Metric | FP16 Baseline | V-CORE Compressed | Delta / Fidelity |
+| :--- | :---: | :---: | :---: |
+| **Perplexity (PPL)** | 14.646 | **15.254** | **+0.607 (+4.1%)** |
+| **Logit Cosine Similarity (151,936 vocab)** | 1.0000 | **0.9617** | **96.2% alignment** |
+| **Native `llama.cpp` GGUF Runtime** | — | **Verified (`Q4_0` + `F16`)** | 5.7 tok/s prompt · 4.6 tok/s gen |
+
+
 ## Installation & Quick Start
 
 ### 1. Clone & Build Everything
