@@ -125,6 +125,6 @@ def verify_with_lean4_engine() -> str:
 
     return (
         "[V-CORE Lean 4] Бинарник vcore_certifier / lake не найден в текущей среде "
-        "(используется предварительно сертифицированный решатель l1-projection-complexity-lean4 v3.0.0)."
+        "(используется предварительно сертифицированный решатель l1-projection-complexity-lean4 v4.0.0)."
     )
     
