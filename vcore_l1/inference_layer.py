@@ -43,7 +43,33 @@ def _load_cuda_lib() -> Optional[ctypes.CDLL]:
     return None
 
 
+def _load_cpu_lib() -> Optional[ctypes.CDLL]:
+    candidates = [
+        os.path.join(os.getcwd(), "build", "libvcore_cpu.so"),
+        os.path.join(os.path.dirname(__file__), "..", "build", "libvcore_cpu.so"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                lib = ctypes.CDLL(path)
+                lib.vcore_cpu_fused_gemm.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                ]
+                return lib
+            except OSError:
+                pass
+    return None
+
+
 _CUDA_LIB = _load_cuda_lib()
+_CPU_LIB = _load_cpu_lib()
 
 
 class VCoreKVCacheQuantizer:
@@ -146,11 +172,12 @@ class VCoreDynamicCache:
         query_length = cache_position if isinstance(cache_position, int) else int(cache_position.shape)
         kv_length = self.get_seq_length(layer_idx) + query_length
         return kv_length, 0
-            
+
 
 class VCoreLinear(nn.Module):
     """
     Drop-in замена для nn.Linear (2-bit / 4-bit + Δ=1 перестановка каналов с выбросами).
+    Использует CUDA-ядра на GPU и нативный AVX2 C++ движок (libvcore_cpu.so) на CPU.
     """
     def __init__(
         self,
@@ -210,14 +237,14 @@ class VCoreLinear(nn.Module):
         if bias is not None:
             layer.bias.copy_(bias.to(torch.float16))
         return layer
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_shape = x.shape
         x_2d = x.reshape(-1, self.in_features)
         if self.vcore_perm is not None:
             x_2d = x_2d[:, self.vcore_perm]
         batch_tokens = x_2d.size(0)
 
+        # 1. Быстрый путь на GPU (CUDA Warp GEMV / Shared-Memory Tiled GEMM)
         if (
             self.bits == 2
             and _CUDA_LIB is not None
@@ -244,6 +271,34 @@ class VCoreLinear(nn.Module):
                 out = out + self.bias.to(x.dtype)
             return out.reshape(*orig_shape[:-1], self.out_features)
 
+        # 2. Быстрый путь на CPU (нативный AVX2 SIMD без распаковки в float32)
+        if (
+            self.bits == 2
+            and _CPU_LIB is not None
+            and (not x_2d.is_cuda)
+            and (self.in_features % self.group_size == 0)
+            and (self.in_features % 4 == 0)
+        ):
+            x_f32 = x_2d.contiguous().to(torch.float32)
+            scales_f32 = self.vcore_scales.contiguous().to(torch.float32)
+            y_f32 = torch.empty((batch_tokens, self.out_features), dtype=torch.float32, device=x.device)
+
+            _CPU_LIB.vcore_cpu_fused_gemm(
+                ctypes.c_void_p(self.vcore_packed.data_ptr()),
+                ctypes.c_void_p(scales_f32.data_ptr()),
+                ctypes.c_void_p(x_f32.data_ptr()),
+                ctypes.c_void_p(y_f32.data_ptr()),
+                batch_tokens,
+                self.out_features,
+                self.in_features,
+                self.group_size,
+            )
+            out = y_f32.to(x.dtype)
+            if self.bias is not None:
+                out = out + self.bias.to(x.dtype)
+            return out.reshape(*orig_shape[:-1], self.out_features)
+
+        # 3. Универсальный PyTorch фоллбэк (INT4 каскадные слои или нестандартный размер)
         num_elems = self.out_features * self.in_features
         padded_elems = ((num_elems + self.group_size - 1) // self.group_size) * self.group_size
         if self.bits == 2:
@@ -258,6 +313,7 @@ class VCoreLinear(nn.Module):
         bias_f32 = self.bias.to(torch.float32) if self.bias is not None else None
         out = F.linear(x_2d.to(torch.float32), w_restored, bias_f32).to(x.dtype)
         return out.reshape(*orig_shape[:-1], self.out_features)
+
 
 def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -> nn.Module:
     for full_name, module in list(model.named_modules()):
@@ -293,6 +349,7 @@ def inject_vcore_layers(model: nn.Module, state_dict: Dict[str, torch.Tensor]) -
     if hasattr(model, "tie_weights"):
         model.tie_weights()
     return model
+
 
 def load_vcore_causal_lm(model_dir: str, device: str = "cpu", dtype: torch.dtype = torch.float16):
     from transformers import AutoConfig, AutoModelForCausalLM
