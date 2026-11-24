@@ -266,8 +266,8 @@ struct NativeLinear {
             const auto& tv_gr = st.tensors[w_key + ".vcore_group"];
 
             const int64_t* sh = (const int64_t*)tv_sh.data;
-            out_features = (int)sh;
-            in_features = (int)sh;
+            out_features = (int)sh [0];
+            in_features = (int)sh [1];
             group_size = (int)(*(const int64_t*)tv_gr.data);
             bits = st.tensors.count(w_key + ".vcore_bits")
                    ? (int)(*(const int64_t*)st.tensors[w_key + ".vcore_bits"].data) : 2;
@@ -282,8 +282,8 @@ struct NativeLinear {
         } else if (st.tensors.count(w_key)) {
             is_packed = false;
             const auto& tv_w = st.tensors[w_key];
-            out_features = (int)tv_w.shape;
-            in_features = (int)tv_w.shape;
+            out_features = (int)tv_w.shape (0);
+            in_features = (int)tv_w.shape (1);
             weight_f32 = tensor_to_f32(tv_w);
         }
         if (st.tensors.count(prefix + ".bias")) {
@@ -524,7 +524,7 @@ int main(int argc, char** argv) {
         lm_head.forward(x.data(), logits.data());
 
         int best_id = 0;
-        float best_val = logits;
+        float best_val = logits.at(0);
         for (int i = 1; i < cfg.vocab_size; ++i) {
             if (logits[i] > best_val) {
                 best_val = logits[i];
@@ -535,7 +535,7 @@ int main(int argc, char** argv) {
     };
 
     int pos = 0;
-    int next_tok = prompt_ids;
+    int next_tok = prompt_ids.at(0);
     for (size_t i = 0; i < prompt_ids.size(); ++i) {
         next_tok = forward_token(prompt_ids[i], pos++);
     }
