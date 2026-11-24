@@ -80,6 +80,17 @@ Evaluated on a `1024 × 1024` heavy-tailed weight matrix (`group_size=32`, chann
 | **V-CORE Exact Critical-Threshold \(\ell_1\)** | **281.8** | **-22.0%** | **-13.0%** |
 | **V-CORE + Channel Outlier Permutation** | **273.0** | **-24.4%** | **-15.7%** |
 
+### 6. Outlier Stress-Test, Layer Output Fidelity & Lean 4 Certification
+
+- **Extreme Outlier Stress-Test (`1×` to `100×` heavy-tailed channel amplification, 1.58-bit):**
+  - At `100×` outlier amplitude, `BitNet absmean` $\ell_1$ error escalates from `107.0` to `285.2` (+166%), whereas **V-CORE + Channel Permutation** stays bounded at **`149.7`** (**47.5% lower error than BitNet**).
+- **Layer Output Distortion ($\|WX - \widehat{W}X\|_1$ on correlated activations):**
+  - `BitNet absmean`: `880.0` → `V-CORE (Data-Free)`: **`573.5` (-34.8%)** → `V-CORE (Activation-Weighted)`: **`501.7` (-43.0%)**.
+- **Bounded-Treewidth ($\Delta=2$) Exact FPT Solver Scaling (`|G|=17`):**
+  - Scales linearly from `12.78 ms` ($m=128$) to `57.10 ms` ($m=512$) and `114.39 ms` ($m=1024$).
+- **Lean 4 Formal Certificate Verification (`vcore_certifier`):**
+  - **10/10 certificates verified** in exact rational arithmetic $\mathbb{Q}$ at **`0.5 ms/certificate`**.
+  - 
 
 ## Installation & Quick Start
 
