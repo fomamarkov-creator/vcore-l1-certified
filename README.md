@@ -59,6 +59,7 @@ Evaluated on real projection weights (`Qwen2.5-0.5B-Instruct`, `layers.0.mlp.gat
 | **Qwen/Qwen2.5-1.5B-Instruct** | 2,944.4 MB | **1,152.3 MB** | **2.56×** | 10.63% | Coherent |
 
 ### 4. Mathematical Fidelity & GGUF Evaluation (`Qwen/Qwen2.5-1.5B-Instruct`)
+> **Pre-built GGUF Artifact:** Download and run the certified `Qwen2.5-1.5B-Instruct` GGUF model directly from Hugging Face: [**MarkovEfim/Qwen2.5-1.5B-Instruct-V-CORE-L1-GGUF**](https://huggingface.co/MarkovEfim/Qwen2.5-1.5B-Instruct-V-CORE-L1-GGUF).
 
 Measured across all 151,936 vocabulary logits against the unquantized FP16 baseline (`2,944.4 MB` → `1,152.3 MB` V-CORE / `1,599.9 MB` GGUF):
 
