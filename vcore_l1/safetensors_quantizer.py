@@ -425,7 +425,7 @@ def repack_safetensors_layerwise(
         save_file(out_tensors, output_path)
 
         orig_mb = os.path.getsize(input_path) / (1024 * 1024)
-                new_mb = os.path.getsize(output_path) / (1024 * 1024)
+        new_mb = os.path.getsize(output_path) / (1024 * 1024)
 
         return {
             "quantized_158bit_layers": q2_layers,
