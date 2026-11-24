@@ -237,6 +237,7 @@ class VCoreLinear(nn.Module):
         if bias is not None:
             layer.bias.copy_(bias.to(torch.float16))
         return layer
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_shape = x.shape
         x_2d = x.reshape(-1, self.in_features)
@@ -244,7 +245,6 @@ class VCoreLinear(nn.Module):
             x_2d = x_2d[:, self.vcore_perm]
         batch_tokens = x_2d.size(0)
 
-        # 1. Быстрый путь на GPU (CUDA Warp GEMV / Shared-Memory Tiled GEMM)
         if (
             self.bits == 2
             and _CUDA_LIB is not None
@@ -270,6 +270,48 @@ class VCoreLinear(nn.Module):
             if self.bias is not None:
                 out = out + self.bias.to(x.dtype)
             return out.reshape(*orig_shape[:-1], self.out_features)
+
+        if (
+            self.bits == 2
+            and _CPU_LIB is not None
+            and (not x_2d.is_cuda)
+            and (self.in_features % self.group_size == 0)
+            and (self.in_features % 4 == 0)
+        ):
+            x_f32 = x_2d.contiguous().to(torch.float32)
+            scales_f32 = self.vcore_scales.contiguous().to(torch.float32)
+            y_f32 = torch.empty((batch_tokens, self.out_features), dtype=torch.float32, device=x.device)
+
+            _CPU_LIB.vcore_cpu_fused_gemm(
+                ctypes.c_void_p(self.vcore_packed.data_ptr()),
+                ctypes.c_void_p(scales_f32.data_ptr()),
+                ctypes.c_void_p(x_f32.data_ptr()),
+                ctypes.c_void_p(y_f32.data_ptr()),
+                batch_tokens,
+                self.out_features,
+                self.in_features,
+                self.group_size,
+            )
+            out = y_f32.to(x.dtype)
+            if self.bias is not None:
+                out = out + self.bias.to(x.dtype)
+            return out.reshape(*orig_shape[:-1], self.out_features)
+
+        num_elems = self.out_features * self.in_features
+        padded_elems = ((num_elems + self.group_size - 1) // self.group_size) * self.group_size
+        if self.bits == 2:
+            grid = unpack_uint8_to_ternary(self.vcore_packed, (padded_elems,)).to(x.device)
+        else:
+            grid = unpack_uint8_to_int4(self.vcore_packed, (padded_elems,)).to(x.device)
+
+        scales = self.vcore_scales.to(torch.float32)
+        w_restored = (grid.reshape(-1, self.group_size) * scales.unsqueeze(1)).reshape(-1)[:num_elems].reshape(
+            self.out_features, self.in_features
+        )
+        bias_f32 = self.bias.to(torch.float32) if self.bias is not None else None
+        out = F.linear(x_2d.to(torch.float32), w_restored, bias_f32).to(x.dtype)
+        return out.reshape(*orig_shape[:-1], self.out_features)
+
 
         # 2. Быстрый путь на CPU (нативный AVX2 SIMD без распаковки в float32)
         if (
