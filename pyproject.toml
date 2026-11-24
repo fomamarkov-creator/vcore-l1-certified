@@ -27,6 +27,7 @@ transformers = ["transformers>=4.40.0"]
 vcore-pack = "vcore_l1.cli:main"
 vcore-bench = "vcore_l1.bench:main"
 vcore-export-gguf = "vcore_l1.gguf_exporter:main"
+vcore-ui = "vcore_l1.tui:main"
 
 [tool.setuptools]
 packages = ["vcore_l1"]
