@@ -69,6 +69,16 @@ Measured across all 151,936 vocabulary logits against the unquantized FP16 basel
 | **Logit Cosine Similarity (`1.5B`)** | 1.0000 | **0.9617** | **96.2% alignment** |
 | **Multi-Step Vector ℓ₁ Norm (`7B` GGUF)** | Exact (`12`) | **Exact (`12`)** | Verified in `llama.cpp` (`Q4_0` + `F16`) |
 
+### 5. Ablation Study: Component-Wise \(\ell_1\) Error Reduction (1.58-Bit)
+
+Evaluated on a `1024 × 1024` heavy-tailed weight matrix (`group_size=32`, channel outliers):
+
+| Method | Total \(\ell_1\) Error | Reduction vs. RTN | Reduction vs. BitNet |
+| :--- | :---: | :---: | :---: |
+| **RTN (Block Max-Scale)** | 361.1 | Baseline | — |
+| **BitNet (`absmean`)** | 323.7 | -10.4% | Baseline |
+| **V-CORE Exact Critical-Threshold \(\ell_1\)** | **281.8** | **-22.0%** | **-13.0%** |
+| **V-CORE + Channel Outlier Permutation** | **273.0** | **-24.4%** | **-15.7%** |
 
 
 ## Installation & Quick Start
