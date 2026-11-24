@@ -31,6 +31,33 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 
 ## Installation & Quick Start
 
+## Benchmarks (NVIDIA Tesla T4 GPU)
+
+### 1. Warp-Parallel CUDA Kernel (`libvcore_engine.so`, `vcore-bench`)
+
+| Layer Dimensions | FP16/32 Memory | V-CORE 1.58-Bit Memory | Memory Reduction | Throughput | Latency / Token |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **1024 × 1024** | 2,048.0 KB | **320.0 KB** | **6.4×** | **2,424.6 steps/s** | **0.41 ms** |
+| **2048 × 2048** | 8,192.0 KB | **1,280.0 KB** | **6.4×** | **1,486.7 steps/s** | **0.67 ms** |
+| **4096 × 4096** | 32,768.0 KB | **5,120.0 KB** | **6.4×** | **364.4 steps/s** | **2.74 ms** |
+
+### 2. Solver Accuracy vs. BitNet (`absmean`) & Bounded-Treewidth FPT
+
+Evaluated on real projection weights (`Qwen2.5-0.5B-Instruct`, `layers.0.mlp.gate_proj`):
+
+| Solver / Method | Total \(\ell_1\) Error | Relative Gain | Runtime (Tesla T4) |
+| :--- | :---: | :---: | :---: |
+| **BitNet `absmean` (1.58-bit)** | 36,105.3 | Baseline | — |
+| **V-CORE Exact Critical-Threshold (1.58-bit)** | **31,813.6** | **-11.9% \(\ell_1\) error** | — |
+| **Bounded-Treewidth (\(\Delta=2\)) FPT (`m=512, |G|=17`)** | 7.695 (exact DP min) | Global optimum | **114.04 ms** |
+
+### 3. End-to-End LLM Compression (`Qwen/Qwen2.5-0.5B-Instruct`)
+
+| Profile | Original Size | Packed Size | Compression | Packing Time (T4) | Inference (`VCoreDynamicCache`) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **High-Precision (`--max-rel-error 0.18`)** | 942.3 MB | **453.7 MB** | **2.08×** | 61.3 s | **8.4 tok/s** |
+| **Balanced (`--max-rel-error 0.35`)** | 942.3 MB | **267.1 MB** | **3.53×** | — | — |
+
 ### 1. Clone & Build Everything
 ```bash
 git clone https://github.com/fomamarkov-creator/vcore-l1-certified
