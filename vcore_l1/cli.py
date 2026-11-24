@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--max-rel-error", type=float, default=0.40, help="Порог относительной L1-ошибки")
     parser.add_argument("--target-vram-gb", type=float, default=None, help="Целевой бюджет видеопамяти в ГБ")
     parser.add_argument("--calib-samples", type=int, default=0, help="Число примеров для сбора активаций и треугольного фактора R (0 = Data-Free)")
-    parser.add_argument("--no-triangular-feedback", action="store_true", help="Отключить треугольную компенсацию корреляций Холецкого при калибровке")
+    parser.add_argument("--triangular-feedback", action="store_true", help="Включить экспериментальную треугольную компенсацию корреляций Холецкого при калибровке")
     parser.add_argument("--export-gguf", default=None, help="Сразу экспортировать сжатую модель в .gguf (для llama.cpp / Ollama)")
     parser.add_argument("--token", default=None, help="Токен Hugging Face")
 
@@ -36,7 +36,7 @@ def main():
     chol_map = None
     if args.calib_samples > 0:
         src_model = args.hf_repo if args.hf_repo else args.input
-        use_cov = not args.no_triangular_feedback
+        use_cov = args.triangular_feedback
         print(f"[V-CORE] Сбор важности активаций ({args.calib_samples} примеров, triangular_feedback={use_cov})...")
         act_map, chol_map = collect_activation_importance(
             src_model,
