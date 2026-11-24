@@ -12,7 +12,7 @@ pip install -e . --no-deps
 
 # 2. Сборка связанного верифицированного ядра Lean 4 (если установлен lake)
 if command -v lake &> /dev/null; then
-    echo "[LEAN 4]: Сборка сертификатора vcore_certifier (v2.0.0)..."
+    echo "[LEAN 4]: Сборка сертификатора vcore_certifier (v4.0.0)..."
     lake update
     lake exe cache get
     lake build
@@ -21,15 +21,17 @@ else
     echo "[INFO]: lake не найден в PATH, пропускаем пересборку Lean 4."
 fi
 
-# 3. Сборка C++/CUDA ядра (если доступен компилятор nvcc)
-if command -v nvcc &> /dev/null; then
-    echo "[CUDA]: Компиляция нативного ядра libvcore_engine..."
-    mkdir -p build && cd build
-    cmake ..
-    make -j$(nproc)
-    cd ..
+# 3. Сборка нативного C++ AVX2 CPU-движка и (при наличии nvcc) CUDA GPU-ядра
+if command -v cmake &> /dev/null; then
+    if command -v nvcc &> /dev/null; then
+        echo "[NATIVE C++/CUDA]: Компиляция libvcore_cpu (AVX2) и libvcore_engine (CUDA)..."
+    else
+        echo "[NATIVE C++]: Компиляция нативного AVX2 CPU-движка libvcore_cpu (nvcc не найден)..."
+    fi
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+    cmake --build build -j$(nproc)
 else
-    echo "[INFO]: nvcc не найден, используется режим PyTorch CPU/GPU."
+    echo "[INFO]: cmake не найден, используется режим PyTorch CPU/GPU."
 fi
 
 echo "--- СИСТЕМА V-CORE L1-CERTIFIED ГОТОВА К РАБОТЕ ---"
