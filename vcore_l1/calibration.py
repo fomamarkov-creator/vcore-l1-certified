@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Efim Sergeevich Markov (ef.87@mail.ru)
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
@@ -20,10 +20,13 @@ def collect_activation_importance(
     num_samples: int = 4,
     seq_len: int = 64,
     token: Optional[str] = None,
-) -> Dict[str, torch.Tensor]:
+    collect_covariance: bool = True,
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     """
-    Прогоняет num_samples калибровочных текстов через модель Hugging Face и собирает
-    среднюю амплитуду входных активаций E[|x_j|] для каждого линейного слоя nn.Linear.
+    Прогоняет num_samples калибровочных текстов через модель Hugging Face и собирает:
+    1. Среднюю амплитуду входных активаций E[|x_j|] для каждого линейного слоя nn.Linear.
+    2. Верхнетреугольный фактор корреляции R (разложение Холецкого X^T X + λI)
+       для точной треугольной компенсации ошибок (MarkovL1TriangularActivation.lean).
     """
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -38,7 +41,9 @@ def collect_activation_importance(
     ).to(device).eval()
 
     acc_norms: Dict[str, torch.Tensor] = {}
+    acc_gram: Dict[str, torch.Tensor] = {}
     counts: Dict[str, int] = {}
+    token_counts: Dict[str, int] = {}
     hooks = []
 
     def make_hook(layer_name: str):
@@ -54,6 +59,16 @@ def collect_activation_importance(
             else:
                 acc_norms[layer_name] += mean_abs
                 counts[layer_name] += 1
+
+            if collect_covariance and x_2d.size(1) <= 8192:
+                gram = (x_2d.T @ x_2d).cpu()
+                if layer_name not in acc_gram:
+                    acc_gram[layer_name] = gram
+                    token_counts[layer_name] = x_2d.size(0)
+                else:
+                    acc_gram[layer_name] += gram
+                    token_counts[layer_name] += x_2d.size(0)
+
         return hook_fn
 
     for name, mod in model.named_modules():
@@ -72,4 +87,19 @@ def collect_activation_importance(
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    return {k: (acc_norms[k] / max(counts[k], 1)) for k in acc_norms}
+    act_scales = {k: (acc_norms[k] / max(counts[k], 1)) for k in acc_norms}
+    chol_factors: Dict[str, torch.Tensor] = {}
+    if collect_covariance:
+        for k, gram in acc_gram.items():
+            n_tok = max(token_counts[k], 1)
+            cov = gram / float(n_tok)
+            damp = 1e-3 * torch.mean(torch.diag(cov)).clamp(min=1e-6)
+            cov_reg = cov + damp * torch.eye(cov.size(0), dtype=torch.float32)
+            try:
+                L = torch.linalg.cholesky(cov_reg)
+                chol_factors[k] = L.T.contiguous()  # Верхнетреугольный фактор R: R^T R ≈ X^T X
+            except RuntimeError:
+                pass
+
+    return act_scales, chol_factors
+                      
