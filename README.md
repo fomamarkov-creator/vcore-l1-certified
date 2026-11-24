@@ -98,3 +98,14 @@ outputs = model.generate(**inputs, past_key_values=kv_cache, max_new_tokens=128)
 ```bash
 vcore-bench --hidden-size 2048 --out-size 2048 --steps 100
 ```
+### 5. Export Compressed Models to Standard GGUF (`vcore-export-gguf`)
+
+Convert any V-CORE compressed model directory directly into a `.gguf` file (`TQ2_0` / `Q4_0` + `F16` with full tokenizer metadata) for local deployment in **llama.cpp**, **Ollama**, or **LM Studio**:
+
+```bash
+# Export an existing V-CORE compressed model directory to GGUF
+vcore-export-gguf --input ./qwen25_vcore --output ./qwen25_vcore.gguf
+
+# Or compress from Hugging Face Hub and export to GGUF in a single command
+vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_vcore --max-rel-error 0.22 --export-gguf ./qwen15_vcore.gguf
+```
