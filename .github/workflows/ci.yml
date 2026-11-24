@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: |
-          pip install numpy safetensors huggingface-hub torch
+          pip install numpy safetensors huggingface-hub torch rich
           pip install -e . --no-deps
           python test_quantizer.py
 
