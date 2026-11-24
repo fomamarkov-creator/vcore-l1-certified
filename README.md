@@ -51,23 +51,24 @@ Evaluated on real projection weights (`Qwen2.5-0.5B-Instruct`, `layers.0.mlp.gat
 | **V-CORE Exact Critical-Threshold (1.58-bit)** | **31,813.6** | **-11.9% ℓ₁ error** | — |
 | **Bounded-Treewidth (Δ=2) FPT (`m=512, |G|=17`)** | 7.695 (exact DP min) | Global optimum | **114.04 ms** |
 
-### 3. End-to-End LLM Compression & Inference (`VCoreDynamicCache`)
+### 3. End-to-End LLM Compression & GGUF Artifacts
 
-| Model | Original Size | Packed Size | Compression | Rel. ℓ₁ Error | Inference Quality |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Qwen/Qwen2.5-0.5B-Instruct** | 942.3 MB | **453.7 MB** | **2.08×** | 10.76% | Coherent (8.4 tok/s) |
-| **Qwen/Qwen2.5-1.5B-Instruct** | 2,944.4 MB | **1,152.3 MB** | **2.56×** | 10.63% | Coherent |
+| Model | Original Size | V-CORE Size | GGUF Size | Compression | Rel. ℓ₁ Error | Pre-built Hugging Face GGUF |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Qwen/Qwen2.5-0.5B-Instruct** | 942.3 MB | 453.7 MB | — | **2.08×** | 10.76% | — |
+| **Qwen/Qwen2.5-1.5B-Instruct** | 2,944.4 MB | 1,152.3 MB | 1,599.9 MB | **2.56×** | 10.63% | [MarkovEfim/Qwen2.5-1.5B-Instruct-V-CORE-L1-GGUF](https://huggingface.co/MarkovEfim/Qwen2.5-1.5B-Instruct-V-CORE-L1-GGUF) |
+| **Qwen/Qwen2.5-7B-Instruct** | 14,525.7 MB | 5,588.9 MB | 5,587.0 MB | **2.60×** | 10.66% | [MarkovEfim/Qwen2.5-7B-Instruct-V-CORE-L1-GGUF](https://huggingface.co/MarkovEfim/Qwen2.5-7B-Instruct-V-CORE-L1-GGUF) |
 
-### 4. Mathematical Fidelity & GGUF Evaluation (`Qwen/Qwen2.5-1.5B-Instruct`)
-> **Pre-built GGUF Artifact:** Download and run the certified `Qwen2.5-1.5B-Instruct` GGUF model directly from Hugging Face: [**MarkovEfim/Qwen2.5-1.5B-Instruct-V-CORE-L1-GGUF**](https://huggingface.co/MarkovEfim/Qwen2.5-1.5B-Instruct-V-CORE-L1-GGUF).
+### 4. Mathematical Fidelity & Native `llama.cpp` Evaluation
 
-Measured across all 151,936 vocabulary logits against the unquantized FP16 baseline (`2,944.4 MB` → `1,152.3 MB` V-CORE / `1,599.9 MB` GGUF):
+Measured across all 151,936 vocabulary logits against the unquantized FP16 baseline (`Qwen/Qwen2.5-1.5B-Instruct`), and verified on multi-step mathematical reasoning (`Qwen/Qwen2.5-7B-Instruct` GGUF in `llama.cpp`):
 
 | Metric | FP16 Baseline | V-CORE Compressed | Delta / Fidelity |
 | :--- | :---: | :---: | :---: |
-| **Perplexity (PPL)** | 14.646 | **15.254** | **+0.607 (+4.1%)** |
-| **Logit Cosine Similarity (151,936 vocab)** | 1.0000 | **0.9617** | **96.2% alignment** |
-| **Native `llama.cpp` GGUF Runtime** | — | **Verified (`Q4_0` + `F16`)** | 5.7 tok/s prompt · 4.6 tok/s gen |
+| **Perplexity (`1.5B`, 151,936 vocab)** | 14.646 | **15.254** | **+0.607 (+4.1%)** |
+| **Logit Cosine Similarity (`1.5B`)** | 1.0000 | **0.9617** | **96.2% alignment** |
+| **Multi-Step Vector ℓ₁ Norm (`7B` GGUF)** | Exact (`12`) | **Exact (`12`)** | Verified in `llama.cpp` (`Q4_0` + `F16`) |
+
 
 
 ## Installation & Quick Start
