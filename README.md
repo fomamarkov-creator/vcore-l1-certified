@@ -29,7 +29,7 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 
 ---
 
-## Installation & Quick Start
+
 
 ## Benchmarks (NVIDIA Tesla T4 GPU)
 
@@ -45,18 +45,20 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 
 Evaluated on real projection weights (`Qwen2.5-0.5B-Instruct`, `layers.0.mlp.gate_proj`):
 
-| Solver / Method | Total \(\ell_1\) Error | Relative Gain | Runtime (Tesla T4) |
+| Solver / Method | Total ℓ₁ Error | Relative Gain | Runtime (Tesla T4) |
 | :--- | :---: | :---: | :---: |
 | **BitNet `absmean` (1.58-bit)** | 36,105.3 | Baseline | — |
-| **V-CORE Exact Critical-Threshold (1.58-bit)** | **31,813.6** | **-11.9% \(\ell_1\) error** | — |
-| **Bounded-Treewidth (\(\Delta=2\)) FPT (`m=512, |G|=17`)** | 7.695 (exact DP min) | Global optimum | **114.04 ms** |
+| **V-CORE Exact Critical-Threshold (1.58-bit)** | **31,813.6** | **-11.9% ℓ₁ error** | — |
+| **Bounded-Treewidth (Δ=2) FPT (`m=512, |G|=17`)** | 7.695 (exact DP min) | Global optimum | **114.04 ms** |
 
-### 3. End-to-End LLM Compression (`Qwen/Qwen2.5-0.5B-Instruct`)
+### 3. End-to-End LLM Compression & Inference (`VCoreDynamicCache`)
 
-| Profile | Original Size | Packed Size | Compression | Packing Time (T4) | Inference (`VCoreDynamicCache`) |
+| Model | Original Size | Packed Size | Compression | Rel. ℓ₁ Error | Inference Quality |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **High-Precision (`--max-rel-error 0.18`)** | 942.3 MB | **453.7 MB** | **2.08×** | 61.3 s | **8.4 tok/s** |
-| **Balanced (`--max-rel-error 0.35`)** | 942.3 MB | **267.1 MB** | **3.53×** | — | — |
+| **Qwen/Qwen2.5-0.5B-Instruct** | 942.3 MB | **453.7 MB** | **2.08×** | 10.76% | Coherent (8.4 tok/s) |
+| **Qwen/Qwen2.5-1.5B-Instruct** | 2,944.4 MB | **1,152.3 MB** | **2.56×** | 10.63% | Coherent |
+
+## Installation & Quick Start
 
 ### 1. Clone & Build Everything
 ```bash
