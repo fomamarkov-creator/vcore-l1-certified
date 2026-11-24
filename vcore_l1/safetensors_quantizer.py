@@ -67,6 +67,8 @@ def _pad_to_group(flat: torch.Tensor, group_size: int) -> Tuple[torch.Tensor, in
         return flat, orig_numel
     pad = group_size - rem
     return torch.cat([flat, torch.zeros(pad, dtype=flat.dtype, device=flat.device)]), orig_numel
+
+
 def quantize_ternary_exact_critical(
     blocks: torch.Tensor,
     imp_blocks: Optional[torch.Tensor] = None,
@@ -120,6 +122,63 @@ def quantize_ternary_exact_critical(
         return out_q, out_mask, out_scales
 
 
+@torch.no_grad()
+def quantize_ternary_triangular_feedback(
+    w_2d: torch.Tensor,
+    R_upper: torch.Tensor,
+    group_size: int = 32,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Реализация теоремы `triangular_channel_exact_reduction` (MarkovL1TriangularActivation.lean):
+    переносит ошибку квантования (w_i - wHat_i) между коррелированными каналами i < j
+    внутри каждого блока через верхнетреугольный фактор Холецкого R.
+    """
+    out_f, in_f = w_2d.shape
+    device, dtype = w_2d.device, w_2d.dtype
+    R = R_upper.to(device=device, dtype=dtype)
+
+    diag_imp = torch.abs(torch.diag(R))
+    padded_w, orig_numel = _pad_to_group(w_2d.reshape(-1), group_size)
+    padded_imp, _ = _pad_to_group(diag_imp.view(1, -1).expand_as(w_2d).reshape(-1), group_size)
+
+    _, init_mask, scales = quantize_ternary_exact_critical(
+        padded_w.view(-1, group_size), imp_blocks=padded_imp.view(-1, group_size)
+    )
+    scales_2d = scales.view(-1, 1).expand(-1, group_size).reshape(-1)[:orig_numel].view(out_f, in_f)
+
+    w_abs = torch.abs(w_2d)
+    pruned_init = init_mask.reshape(-1)[:orig_numel].view(out_f, in_f) == 0
+    theta_2d = torch.where(pruned_init, w_abs, torch.zeros_like(w_abs))
+
+    w_hat = torch.zeros_like(w_2d)
+    mask_out = torch.zeros_like(w_2d)
+
+    for b_start in range(0, in_f, group_size):
+        b_end = min(b_start + group_size, in_f)
+        b_len = b_end - b_start
+        R_blk = R[b_start:b_end, b_start:b_end]
+        errs_blk = torch.zeros((out_f, b_len), device=device, dtype=dtype)
+
+        for j in range(b_len):
+            r_jj = R_blk[j, j]
+            if j > 0 and torch.abs(r_jj) > 1e-8:
+                feedback = errs_blk[:, :j] @ (R_blk[:j, j] / r_jj)
+                w_tilde = w_2d[:, b_start + j] + feedback
+            else:
+                w_tilde = w_2d[:, b_start + j]
+
+            th_j = theta_2d[:, b_start + j]
+            sc_j = scales_2d[:, b_start + j]
+            m_j = torch.where(torch.abs(w_tilde) > th_j, torch.sign(w_tilde), torch.zeros_like(w_tilde))
+            wh_j = m_j * sc_j
+
+            mask_out[:, b_start + j] = m_j
+            w_hat[:, b_start + j] = wh_j
+            errs_blk[:, j] = w_2d[:, b_start + j] - wh_j
+
+    return w_hat, mask_out, scales
+
+
 def _quantize_int4_blockwise(w_f32: torch.Tensor, group_size: int = 32) -> Tuple[torch.Tensor, torch.Tensor, float]:
     with torch.no_grad():
         flat = w_f32.reshape(-1)
@@ -136,7 +195,6 @@ def _quantize_int4_blockwise(w_f32: torch.Tensor, group_size: int = 32) -> Tuple
         err = torch.sum(torch.abs(w_f32 - w_hat)).item()
         return q_int.reshape(-1).narrow(0, 0, orig_numel).reshape(w_f32.shape), step.reshape(-1), err
 
-
 def _quantize_tensor_cascade(
     w_f32: torch.Tensor,
     cascade_groups: List[int],
@@ -145,6 +203,7 @@ def _quantize_tensor_cascade(
     auto_theta: bool,
     allow_int4: bool = True,
     act_scales: Optional[torch.Tensor] = None,
+    chol_R: Optional[torch.Tensor] = None,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor, int, int, float]]:
     with torch.no_grad():
         orig_l1 = torch.sum(torch.abs(w_f32)).item()
@@ -158,6 +217,19 @@ def _quantize_tensor_cascade(
             eff_g = min(g, flat.numel())
             if eff_g <= 0:
                 continue
+
+            if (
+                auto_theta
+                and chol_R is not None
+                and w_f32.ndim == 2
+                and chol_R.size(0) == w_f32.size(1)
+                and (w_f32.size(1) % eff_g == 0)
+            ):
+                w_q, mask, scales = quantize_ternary_triangular_feedback(w_f32, chol_R, group_size=eff_g)
+                err = torch.sum(torch.abs(w_f32 - w_q)).item()
+                if (err / (orig_l1 + 1e-8)) <= max_rel_error:
+                    return mask, scales, eff_g, 2, err
+
             padded_flat, orig_numel = _pad_to_group(flat, eff_g)
             imp_padded = None
             if imp_flat is not None:
@@ -185,6 +257,8 @@ def _quantize_tensor_cascade(
                 return q_int4, scales4, eff_g4, 4, err4
 
         return None
+
+
 def _estimate_threshold_for_vram(
     state_dict: Dict[str, torch.Tensor],
     target_vram_gb: float,
@@ -224,8 +298,8 @@ def _estimate_threshold_for_vram(
         if work_device.type == "cuda":
             torch.cuda.empty_cache()
 
-        layer_profiles.sort(key=lambda x: x)
-        cur_bytes = fixed_bytes + sum(x for x in layer_profiles)
+        layer_profiles.sort(key=lambda x: x[0])
+        cur_bytes = fixed_bytes + sum(x[1] for x in layer_profiles)
         chosen_thresh = 0.40
         for rel_err, fp_b, q2_b in layer_profiles:
             if cur_bytes <= target_bytes:
@@ -247,6 +321,7 @@ def repack_safetensors_layerwise(
     target_vram_gb: Optional[float] = None,
     channel_perm: bool = True,
     activation_map: Optional[Dict[str, torch.Tensor]] = None,
+    chol_map: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Dict[str, float]:
     with torch.no_grad():
         state_dict = load_file(input_path)
@@ -287,8 +362,11 @@ def repack_safetensors_layerwise(
 
             act_raw = activation_map.get(name, None) if activation_map is not None else None
             act_s = act_raw.to(device=work_device, dtype=torch.float32) if act_raw is not None else None
+            chol_raw = chol_map.get(name, None) if chol_map is not None else None
+            chol_r = chol_raw.to(device=work_device, dtype=torch.float32) if chol_raw is not None else None
+
             perm = None
-            if channel_perm and w_f32.ndim == 2 and w_f32.size(1) >= 16:
+            if channel_perm and chol_r is None and w_f32.ndim == 2 and w_f32.size(1) >= 16:
                 col_l1 = torch.sum(torch.abs(w_f32), dim=0)
                 if act_s is not None and act_s.numel() == w_f32.size(1):
                     col_l1 = col_l1 * torch.abs(act_s)
@@ -307,6 +385,7 @@ def repack_safetensors_layerwise(
                 auto_theta=auto_theta,
                 allow_int4=cascade,
                 act_scales=act_work,
+                chol_R=chol_r,
             )
 
             if res is not None:
@@ -333,6 +412,8 @@ def repack_safetensors_layerwise(
             del w_f32, w_work
             if act_s is not None:
                 del act_s
+            if chol_r is not None:
+                del chol_r
 
         print(flush=True)
         del state_dict
@@ -344,7 +425,7 @@ def repack_safetensors_layerwise(
         save_file(out_tensors, output_path)
 
         orig_mb = os.path.getsize(input_path) / (1024 * 1024)
-        new_mb = os.path.getsize(output_path) / (1024 * 1024)
+                new_mb = os.path.getsize(output_path) / (1024 * 1024)
 
         return {
             "quantized_158bit_layers": q2_layers,
@@ -356,7 +437,9 @@ def repack_safetensors_layerwise(
             "compression_ratio": orig_mb / max(new_mb, 1e-6),
             "total_l1_orig": total_l1_orig,
             "total_l1_err": total_l1_err,
-            }
+        }
+
+
 def repack_sharded_model(
     input_dir: str,
     output_dir: str,
@@ -368,6 +451,7 @@ def repack_sharded_model(
     cascade: bool = True,
     target_vram_gb: Optional[float] = None,
     activation_map: Optional[Dict[str, torch.Tensor]] = None,
+    chol_map: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Dict[str, float]:
     os.makedirs(output_dir, exist_ok=True)
     shard_files = sorted(glob.glob(os.path.join(input_dir, "*.safetensors")))
@@ -401,6 +485,7 @@ def repack_sharded_model(
             cascade=cascade,
             target_vram_gb=per_shard_vram,
             activation_map=activation_map,
+            chol_map=chol_map,
         )
         for k in (
             "quantized_158bit_layers",
@@ -431,8 +516,6 @@ def repack_sharded_model(
 
     agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
     return agg
-
-
 def repack_hf_hub_model(
     repo_id: str,
     output_dir: str,
@@ -442,6 +525,7 @@ def repack_hf_hub_model(
     token: Optional[str] = None,
     target_vram_gb: Optional[float] = None,
     activation_map: Optional[Dict[str, torch.Tensor]] = None,
+    chol_map: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Dict[str, float]:
     from huggingface_hub import HfApi, hf_hub_download
 
@@ -483,6 +567,7 @@ def repack_hf_hub_model(
                 max_rel_error=max_rel_error,
                 target_vram_gb=per_shard_vram,
                 activation_map=activation_map,
+                chol_map=chol_map,
             )
             for k in (
                 "quantized_158bit_layers",
