@@ -282,8 +282,8 @@ struct NativeLinear {
         } else if (st.tensors.count(w_key)) {
             is_packed = false;
             const auto& tv_w = st.tensors[w_key];
-            out_features = (int)tv_w.shape (0);
-            in_features = (int)tv_w.shape (1);
+            out_features = (int)tv_w.shape.at(0);
+            in_features = (int)tv_w.shape.at(1);
             weight_f32 = tensor_to_f32(tv_w);
         }
         if (st.tensors.count(prefix + ".bias")) {
