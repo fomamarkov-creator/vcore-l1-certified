@@ -22,6 +22,10 @@ jobs:
           lake exe cache get
           lake build
           lake exe vcore_certifier --verify-bench
+      - name: Build Native CPU AVX2 Engine
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target vcore_cpu -j $(nproc)
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -44,5 +48,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: libvcore_engine-cuda12-all-gpus
-          path: build/libvcore_engine.so
-          
+          path: |
+            build/libvcore_engine.so
+            build/libvcore_cpu.so
+            
