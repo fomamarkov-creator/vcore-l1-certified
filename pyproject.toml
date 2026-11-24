@@ -17,7 +17,8 @@ dependencies = [
     "torch>=2.0.0",
     "safetensors>=0.4.0",
     "huggingface-hub>=0.20.0",
-    "gguf>=0.10.0"
+    "gguf>=0.10.0",
+    "rich>=13.0.0"
 ]
 
 [project.optional-dependencies]
@@ -29,7 +30,6 @@ vcore-bench = "vcore_l1.bench:main"
 vcore-export-gguf = "vcore_l1.gguf_exporter:main"
 vcore-ui = "vcore_l1.tui:main"
 vcore-web = "vcore_l1.web_ui:main"
-
 
 [tool.setuptools]
 packages = ["vcore_l1"]
