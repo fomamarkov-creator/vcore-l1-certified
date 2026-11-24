@@ -25,7 +25,7 @@ def _map_hf_to_gguf_name(hf_name: str, arch: str) -> Optional[str]:
 
     if hf_name.startswith("model.layers."):
         parts = hf_name.split(".")
-        layer_id = parts[2]
+        layer_id = parts
         rest = ".".join(parts[3:])
         mapping = {
             "input_layernorm.weight": f"blk.{layer_id}.attn_norm.weight",
@@ -60,7 +60,6 @@ def _pack_tq2_0_numpy(ternary_grid: np.ndarray, block_scales: np.ndarray, group_
     if block_scales.size != num_blocks:
         return None
 
-    # llama.cpp TQ2_0 кодирует {-1, 0, +1} как {0, 1, 2} по 4 элемента в байт (младшие биты первыми)
     codes = (np.rint(ternary_grid).astype(np.int8) + 1).astype(np.uint8).reshape(num_blocks, 64, 4)
     packed_bytes = (
         codes[:, :, 0]
@@ -102,7 +101,8 @@ def _restore_vcore_tensor_to_fp32(
         restored = restored.index_select(1, inv_perm)
 
     return restored.cpu().numpy().astype(np.float32), bits, has_perm
-def _load_hf_tokenizer_to_gguf(writer, model_dir: str) -> None:
+
+def _load_hf_tokenizer_to_gguf(writer, model_dir: str, target_vocab_size: int = 0) -> None:
     tok_json = os.path.join(model_dir, "tokenizer.json")
     tok_cfg = os.path.join(model_dir, "tokenizer_config.json")
     if not os.path.isfile(tok_json):
@@ -117,17 +117,16 @@ def _load_hf_tokenizer_to_gguf(writer, model_dir: str) -> None:
     if not full_vocab:
         return
 
-    max_id = max(full_vocab.values())
-    tokens = ["<unk>"] * (max_id + 1)
+    max_id = max(max(full_vocab.values()), target_vocab_size - 1)
+    tokens = [f"<|extra_{i}|>" for i in range(max_id + 1)]
     scores = [0.0] * (max_id + 1)
-    token_types = [1] * (max_id + 1)
+    token_types = * (max_id + 1)
 
     added_ids = set(added.values())
     for tok_str, tid in full_vocab.items():
         if 0 <= tid <= max_id:
             tokens[tid] = tok_str
-            if tid in added_ids:
-                token_types[tid] = 3
+            token_types[tid] = 3 if tid in added_ids else 1
 
     writer.add_tokenizer_model("gpt2")
     writer.add_token_list(tokens)
@@ -200,7 +199,7 @@ def export_vcore_to_gguf(
     if "rope_theta" in cfg:
         writer.add_rope_freq_base(float(cfg["rope_theta"]))
 
-    _load_hf_tokenizer_to_gguf(writer, model_dir)
+    _load_hf_tokenizer_to_gguf(writer, model_dir, target_vocab_size=int(cfg.get("vocab_size", 0)))
 
     shard_files = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
     if not shard_files:
@@ -210,7 +209,7 @@ def export_vcore_to_gguf(
     for sf in shard_files:
         merged_sd.update(load_file(sf))
 
-    vcore_bases = sorted({k.split(".vcore_")[0] for k in merged_sd.keys() if ".vcore_" in k})
+    vcore_bases = sorted({k.split(".vcore_") for k in merged_sd.keys() if ".vcore_" in k})
     plain_keys = sorted([k for k in merged_sd.keys() if ".vcore_" not in k])
 
     stats = {"tq2_0_tensors": 0, "q4_0_tensors": 0, "f16_tensors": 0}
@@ -244,7 +243,7 @@ def export_vcore_to_gguf(
                 stats["tq2_0_tensors"] += 1
                 continue
 
-        if quant_mode != "f16" and w_fp32.ndim == 2 and (w_fp32.shape[1] % 32 == 0):
+        if quant_mode != "f16" and w_fp32.ndim == 2 and (w_fp32.shape % 32 == 0):
             q_data = gguf.quants.quantize(w_fp32, gguf.GGMLQuantizationType.Q4_0)
             writer.add_tensor(g_name, q_data, raw_dtype=gguf.GGMLQuantizationType.Q4_0)
             stats["q4_0_tensors"] += 1
@@ -301,4 +300,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-  
+    
