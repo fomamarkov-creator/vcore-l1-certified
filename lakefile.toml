@@ -10,7 +10,7 @@ autoImplicit = false
 [[require]]
 name = "MarkovL1Complexity"
 git = "https://github.com/fomamarkov-creator/l1-projection-complexity-lean4"
-rev = "v3.0.0"
+rev = "v4.0.0"
 
 [[lean_exe]]
 name = "vcore_certifier"
