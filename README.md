@@ -148,3 +148,18 @@ vcore-export-gguf --input ./qwen25_vcore --output ./qwen25_vcore.gguf
 # Or compress from Hugging Face Hub and export to GGUF in a single command
 vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_vcore --max-rel-error 0.22 --export-gguf ./qwen15_vcore.gguf
 ```
+### 6. Interactive Terminal Studio (`vcore-ui`), Wave Web UI (`vcore-web`) & Standalone C++ Runner (`vcore-run`)
+
+* **Interactive Terminal Neural Studio (TUI with live telemetry & streaming):**
+  ```bash
+  vcore-ui --model ./qwen15_vcore
+  ```
+* **Interactive Wave-Interference Web UI (browser chat on PC or mobile):**
+  ```bash
+  vcore-web --model ./qwen15_vcore --port 8080
+  ```
+* **Zero-Dependency Native C++17 / AVX2 Binary (`vcore-run`, no Python/PyTorch required):**
+  ```bash
+  ./build/vcore-run --model ./qwen15_vcore --prompt "Explain L1 median quantization." --tokens 64
+  ```
+  
