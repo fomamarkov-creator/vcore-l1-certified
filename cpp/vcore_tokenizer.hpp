@@ -115,8 +115,8 @@ public:
             }
         }
         return !id_to_token.empty();
-}
-    std::string decode(int token_id) const {
+    }
+        std::string decode(int token_id) const {
         if (token_id < 0 || token_id >= (int)id_to_token.size()) return "";
         const std::string& raw = id_to_token[token_id];
         if (raw.empty()) return "";
