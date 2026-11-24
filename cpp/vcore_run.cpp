@@ -25,6 +25,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include "vcore_tokenizer.hpp"
 
 extern "C" void vcore_cpu_fused_gemm(const uint8_t* W_packed,
                                      const float* block_scales,
