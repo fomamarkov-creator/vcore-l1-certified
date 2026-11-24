@@ -10,6 +10,10 @@ from vcore_l1 import (
     VCoreDynamicCache,
     inject_vcore_layers,
     verify_with_lean4_engine,
+    solve_chain_overlap_fpt,
+    solve_continuous_chain_dp,
+    solve_triple_overlap_fpt,
+    quantize_ternary_triangular_feedback,
 )
 
 
@@ -21,10 +25,10 @@ def absmean_bitnet_quantize(weights: torch.Tensor) -> torch.Tensor:
 
 
 def main():
-    print("=== 1. Проверка математического ядра Lean 4 (v3.0.0 — 8 модулей) ===")
+    print("=== 1. Проверка математического ядра Lean 4 (v4.0.0 — 12 модулей) ===")
     print(verify_with_lean4_engine().strip())
 
-    print("\n=== 2. Сравнение с BitNet (absmean) и тест Activation-Weighted L1 ===")
+    print("\n=== 2. Сравнение с BitNet (absmean), Activation-Weighted L1 и Triangular Feedback ===")
     torch.manual_seed(42)
     weights = torch.randn(128, 256) * 0.05
     weights[torch.rand_like(weights) < 0.005] *= 40.0
@@ -41,6 +45,14 @@ def main():
     weighted_err_unweighted = torch.sum(act_imp.view(1, -1) * torch.abs(weights - w_vcore)).item()
     weighted_err_aware = torch.sum(act_imp.view(1, -1) * torch.abs(weights - w_weighted)).item()
     assert weighted_err_aware <= weighted_err_unweighted
+
+    # Проверка треугольной компенсации корреляций активаций (MarkovL1TriangularActivation)
+    X_calib = torch.randn(64, 256)
+    X_calib[:, 1] = 0.85 * X_calib[:, 0] + 0.15 * X_calib[:, 1]
+    cov = (X_calib.T @ X_calib) / 64.0 + 1e-3 * torch.eye(256)
+    R_upper = torch.linalg.cholesky(cov).T
+    w_tri, _, _ = quantize_ternary_triangular_feedback(weights, R_upper, group_size=32)
+    assert w_tri.shape == weights.shape
 
     print("\n=== 3. Тест каскада (1.58-bit -> INT4 -> FP16), VCoreDynamicCache и VRAM Budget ===")
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -74,6 +86,7 @@ def main():
         assert isinstance(net.fc2, VCoreLinear)
         assert {net.fc1.bits, net.fc2.bits} == {2, 4}
 
+        # Тест батча из 4 токенов (проверка нового тайлового GEMM-ядра)
         y_out = net(torch.randn(4, 128, dtype=torch.float16))
         assert y_out.shape == (4, 32)
 
@@ -84,17 +97,24 @@ def main():
     k_cat, v_cat = cache.update(k2, v2, layer_idx=0)
     assert k_cat.shape == (1, 4, 9, 64) and cache.get_seq_length() == 9
 
-    from vcore_l1 import solve_chain_overlap_fpt
-
+    # Проверка сеточного и непрерывного FPT (Δ = 2, treewidth k = 1) + Δ = 3 (treewidth k = 2)
     w_chain = torch.tensor([4.0, 0.0, -4.0, 0.0])
     c_opt, fpt_cost = solve_chain_overlap_fpt(w_chain, num_grid=9)
     assert c_opt.shape == (4,) and abs(fpt_cost - 4.0) < 1e-6
 
+    w_cont = torch.tensor([4.0, 8.0, 4.0])
+    c_cont, cont_cost = solve_continuous_chain_dp(w_cont)
+    assert c_cont.shape == (3,) and abs(cont_cost - 8.0) < 1e-5
+
+    w_triple = torch.tensor([2.0, 0.0, 6.0, 4.0])
+    grid_tw2 = torch.tensor([-2.0, 0.0, 2.0, 4.0])
+    c_tw2, tw2_cost = solve_triple_overlap_fpt(w_triple, grid=grid_tw2)
+    assert c_tw2.shape == (4,) and abs(tw2_cost - 6.0) < 1e-5
 
     subprocess.run(["vcore-bench", "--hidden-size", "256", "--out-size", "256", "--steps", "10"], check=True)
-    print("[OK] Все компоненты (Lean 4 v3.0.0, Activation-Weighted L1, Warp CUDA, Cascade, KV-Cache) работают!")
+    print("[OK] Все компоненты v2.0.0 (Lean 4 v4.0.0, Continuous DP, Triangular Feedback, Tiled CUDA GEMM) работают!")
 
 
 if __name__ == "__main__":
     main()
-                
+    
