@@ -168,6 +168,9 @@ model = VCoreModelForCausalLM.from_vcore_pretrained("./qwen25_vcore", device="cu
 # 3. Generate with 2-bit compressed KV-cache
 kv_cache = VCoreDynamicCache(group_size=32)
 outputs = model.generate(**inputs, past_key_values=kv_cache, max_new_tokens=128)
+
+> **Practical Tip for 2-Bit KV-Cache (`VCoreDynamicCache`):** On compact GQA models (`0.5B`–`1.5B`) with very few KV heads, combining quantized weights with 2-bit KV-cache compression can accumulate key-quantization drift on repetitive long contexts. For sub-2B models, use a finer group size (`VCoreDynamicCache(group_size=16)`) or keep standard FP16 KV-cache; reserve `group_size=32` 2-bit KV compression for `7B+` models where wider attention heads preserve context stability.
+
 ```
 
 ### 4. Benchmark Speed & Memory (`vcore-bench`)
