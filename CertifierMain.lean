@@ -17,6 +17,8 @@ import MarkovL1EntropyAndSparsity
 import MarkovL1MoERoutingAndDynamicBits
 import MarkovL1ZeroKnowledgeInferenceCert
 import MarkovL1HCPAndBirkhoffQuantizer
+import MarkovL1FullTransformerCert
+import MarkovL1RoPEAndGolaySyndrome
 
 open MarkovL1Solver
 open MarkovL1WeightedSolver
@@ -69,6 +71,24 @@ def main (args : List String) : IO Unit := do
       let bjOrth := MarkovL1HCPAndBirkhoffQuantizer.checkBirkhoffL1OrthogonalQ [2/1, -2/1, 0/1, 0/1] [1/2, 1/2, 1/4, -1/4]
       IO.println s!"[V-CORE 3HCP (13-pt) & Birkhoff-James ℓ₁] Le0={MarkovL1HCPAndBirkhoffQuantizer.Le0_gap} | orth={bjOrth}"
 
+      -- Модули 22-23: W32/Λ32, LUT-инференс, Mixed-Lattice бюджет, E2E Transformer Cert, RoPE и синдром Голея
+      let plan : List MarkovL1FullTransformerCert.MixedLatticeLayerSpec := [
+        { layerName := "attn.v_proj (D4)", bpw := 1161/1000, paramCount := 10/1, holderDriftBound := 1/100 },
+        { layerName := "mlp.gate_proj (Leech Λ24)", bpw := 733/1000, paramCount := 50/1, holderDriftBound := 3/100 },
+        { layerName := "mlp.up_proj (Leech Λ24)", bpw := 733/1000, paramCount := 50/1, holderDriftBound := 3/100 }
+      ]
+      let mixedOK := MarkovL1FullTransformerCert.verifyMixedLatticePlanQ plan (80/100) (1/10)
+      let blockBudget : MarkovL1FullTransformerCert.TransformerBlockErrorBudget := {
+        δ_x := 1/100, L_norm := 1/1, ε_qkv := 1/200, ε_o := 1/200,
+        ε_K := 1/100, ε_V := 1/100, L_sm := 1/2, ε_mlp := 1/100,
+        L_act := 1/1, B_X := 2/1
+      }
+      IO.println s!"[V-CORE v4.0 Mixed-Lattice & E2E Block] plan_ok={mixedOK} | max_block_drift={MarkovL1FullTransformerCert.transformerBlockTotalDriftQ blockBudget}"
+      let (cRope, sRope) := MarkovL1RoPEAndGolaySyndrome.rationalCayleyCS (1/2)
+      let cw := MarkovL1RoPEAndGolaySyndrome.encodeGolay24 1337
+      let err : UInt32 := (1 : UInt32) <<< 5
+      IO.println s!"[V-CORE v4.0 Rational RoPE & Golay G₂₄] unit={cRope*cRope + sRope*sRope} | syn_inv={MarkovL1RoPEAndGolaySyndrome.syndromeGolay24 (cw ^^^ err) == MarkovL1RoPEAndGolaySyndrome.syndromeGolay24 err}"
+
   | _ =>
-      IO.println "V-CORE Certified Lean 4 Bridge (linked to l1-projection-complexity-lean4 v5.0.0 — 21 Modules)"
+      IO.println "V-CORE Certified Lean 4 Bridge (linked to l1-projection-complexity-lean4 v6.0.0 — 23 Modules)"
       IO.println "Usage: lake exe vcore_certifier --verify-bench"
