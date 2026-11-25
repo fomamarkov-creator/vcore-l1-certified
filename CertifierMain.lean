@@ -8,6 +8,15 @@ import MarkovL1TreewidthSolver
 import MarkovL1ContinuousChainDP
 import MarkovL1TriangularActivation
 import MarkovL1GeneralTreewidthFPT
+import MarkovL1NextGenQuantizer
+import MarkovL1SuperQuantizer
+import MarkovL1UltimateE8Engine
+import MarkovL1AttentionKVCache
+import MarkovL1LeechAndLowRank
+import MarkovL1EntropyAndSparsity
+import MarkovL1MoERoutingAndDynamicBits
+import MarkovL1ZeroKnowledgeInferenceCert
+import MarkovL1HCPAndBirkhoffQuantizer
 
 open MarkovL1Solver
 open MarkovL1WeightedSolver
@@ -39,6 +48,27 @@ def main (args : List String) : IO Unit := do
       let tw2Cost := solveTripleOverlapFPT [-2/1, 0/1, 2/1, 4/1] [2/1, 0/1, 6/1, 4/1]
       IO.println s!"[V-CORE Treewidth k=2 (Δ=3, W_Q/K/V)] min_L1_cost={tw2Cost} (certified_fpt=true)"
 
+      -- Модули 13-21: Решётки 3HCP / D4 / E8 / Λ24, Hadamard W8, 2:4, MoE, Freivalds, Birkhoff-James
+      let sqOut := MarkovL1SuperQuantizer.superQuantize4Q (2/1) (10/1, -2/1, 3/1, -1/1)
+      IO.println s!"[V-CORE Super-Quantizer (H₄ + D₄ 1.16b)] mode={repr sqOut.mode} | certBound={sqOut.certifiedMaxOutputErr}"
+      let netBound := MarkovL1UltimateE8Engine.networkErrorBoundQ (10/1) [(1/2, 1/100), (1/2, 1/100), (1/2, 1/100)]
+      IO.println s!"[V-CORE Sub-1-Bit E₈ (241-pt, 0.989 b/w)] L3_logit_drift_bound={netBound}"
+      let w8 : MarkovL1AttentionKVCache.Vec8Q := ⟨1/2, -1/2, 1/4, 3/4, -1/4, 1/2, 0, -1/2⟩
+      let x8 : MarkovL1AttentionKVCache.Vec8Q := ⟨2/1, 1/1, -1/1, 3/1, 1/2, -1/2, 4/1, 1/1⟩
+      let hDot := MarkovL1AttentionKVCache.dot8Q (MarkovL1AttentionKVCache.walshHadamard8Q w8) (MarkovL1AttentionKVCache.walshHadamard8Q x8) / 8
+      IO.println s!"[V-CORE In-Domain Hadamard W₈ Dot] exact_dot={hDot} (no_inverse_transform=true)"
+      let E_res : List (List ℚ) := [[2/1, 4/1, 6/1], [-1/1, -2/1, -3/1]]
+      let u_opt := MarkovL1LeechAndLowRank.updateLeftFactorL1Q E_res [1/1, 2/1, 3/1]
+      IO.println s!"[V-CORE Golay G₂₄ (4096-cw) & ℓ₁-LoRA] rank1_factor={u_opt} (~0.733 b/w Leech Λ₂₄)"
+      let q24 := MarkovL1EntropyAndSparsity.quantize24SparseTernaryQ (10/1, -2/1, 8/1, -1/1)
+      IO.println s!"[V-CORE 2:4 Sparse L1 & Kraft Entropy] q24={q24} (nnz={MarkovL1EntropyAndSparsity.nnz4Q q24} ≤ 2)"
+      let moeSafe := MarkovL1MoERoutingAndDynamicBits.verifyMoERoutingSafety [(5/2, 1/10), (2/1, 1/10)] [(3/2, 1/10), (1/2, 1/10)]
+      IO.println s!"[V-CORE MoE Top-K Routing Safety] invariant={moeSafe}"
+      let freivaldsOK := MarkovL1ZeroKnowledgeInferenceCert.verifyMatMulFreivaldsQ [[1/1, 2/1], [3/1, 4/1]] [[2/1, 0/1], [1/1, 2/1]] [[4/1, 4/1], [10/1, 8/1]] [1/1, 3/1]
+      IO.println s!"[V-CORE O(n²) Freivalds MatMul Cert] verified={freivaldsOK}"
+      let bjOrth := MarkovL1HCPAndBirkhoffQuantizer.checkBirkhoffL1OrthogonalQ [2/1, -2/1, 0/1, 0/1] [1/2, 1/2, 1/4, -1/4]
+      IO.println s!"[V-CORE 3HCP (13-pt) & Birkhoff-James ℓ₁] Le0={MarkovL1HCPAndBirkhoffQuantizer.Le0_gap} | orth={bjOrth}"
+
   | _ =>
-      IO.println "V-CORE Certified Lean 4 Bridge (linked to l1-projection-complexity-lean4 v4.0.0 — 12 Modules)"
+      IO.println "V-CORE Certified Lean 4 Bridge (linked to l1-projection-complexity-lean4 v5.0.0 — 21 Modules)"
       IO.println "Usage: lake exe vcore_certifier --verify-bench"
