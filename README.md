@@ -1,13 +1,14 @@
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
-* **Lean Core:** `l1-projection-complexity-lean4` (`v4.0.0` — 12 Verified Modules) 
+* **Lean Core:** `l1-projection-complexity-lean4` (`v5.0.0` — **21 Verified Modules**) 
 * **Toolchain:** Lean `v4.37.0-rc1` 
-* **Backend:** PyTorch / Warp-CUDA (`sm_70`–`sm_90`) 
+* **Backend:** PyTorch / Warp-CUDA (`sm_70`–`sm_90`) / Native AVX2 C++17
 * **License:** AGPL-3.0
 
-# V-CORE (ℓ₁)-Certified: Hybrid Lean 4 + GPU 1.58-Bit & INT4 Quantization & Inference Engine
+# V-CORE (ℓ₁)-Certified v3.0: Sub-1-Bit Lattice (E₈ / D₄ / 3HCP), Hadamard W₈ & Verified GPU/CPU Quantization Engine
 
-A complete symbolic-numeric compression and inference runtime combining a **machine-checked Lean 4 formal verification core** (`l1-projection-complexity-lean4`, release `v4.0.0`)  with **activation-weighted \(\ell_1\) medians**, **bounded-treewidth (Δ = 2) FPT dynamic programming2, continuous grid-free PWL solvers, triangular Cholesky error feedback (ℓ₁-GPTQ)**, **channel-outlier permutation**, **multi-stage precision cascade (`1.58-bit -> INT4 -> FP16`) with Auto-Rollback**, **2-bit KV-cache compression**, and **warp-parallel CUDA kernels** (`libvcore_engine.so`).
+A complete symbolic-numeric compression and inference runtime combining a **machine-checked 21-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v5.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
+
 
 * **Author:** E. S. Markov (ORCID: `0009-0005-2235-5464`)
 * **Affiliation:** Independent Researcher, Astrakhan, Russia
@@ -31,6 +32,12 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
    * Compresses autoregressive context memory on the fly via `VCoreDynamicCache`.
    * Runs `vcore_fused_ternary_gemv_warp for single-token decoding and shared-memory tiled uint32 vcore_fused_ternary_gemm_tiled for long-context prefill` (32-thread warp reduction with `__shfl_down_sync` and 32-bit `uint32` register loads) directly on 2-bit packed `uint8` weights without unpacking to `float32` in VRAM (`sm_70`–`sm_90`).
 
+5. **Sub-1-Bit Root Lattices, In-Domain Hadamard `W₈` & `ℓ₁`-LoRA (`vcore_l1/super_quantizer.py`):**
+   * **Vector Lattice Quantizers:** Quantizes weight tuples directly into verified coordination shells of **`3HCP`** (13 states, `1.23 b/w`), **`D₄`** (25 states, `1.16 b/w`), and **`E₈`** (241 states, `0.989 b/w`, packed 8 weights per byte `uint8`) via `quantize_3hcp_lattice`, `quantize_d4_lattice`, and `quantize_e8_lattice`.
+   * **Multiplier-Free In-Domain Hadamard Inference (`VCoreInDomainHadamardLinear`):** Exploits $(W_8 w) \cdot (W_8 x) = 8(w \cdot x)$ to store lattice weights directly in the rotated Walsh–Hadamard domain without inverse weight transforms at runtime.
+   * **Adaptive Super-Quantizer & Residual Compensation (`VCoreSuperQuantizer`, `fit_datafree_l1_lora`):** Automatically cascades `D₄ (1.16b) -> Asym 1.58b -> Residual 3.16b` with certified error bounds, and recovers post-quantization residuals via alternating weighted-median `ℓ₁`-LoRA ($E \approx U V^T$) without training data.
+   * **Hardware 2:4 Sparsity, Register Inversion, MoE Safety & $O(n^2)$ Certificates:** Provides exact combinatorial 2:4 sparse projection (`quantize_24_sparse_l1`), outlier register isolation (`register_inversion_split`, $Le_0 = 0.024$), Mixture-of-Experts Top-$K$ routing invariance checks (`verify_moe_routing_safety`), and fast $O(n^2)$ Freivalds matrix-multiplication verification (`verify_matmul_freivalds`).
+   * 
 ---
 ![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
 
