@@ -72,7 +72,7 @@ def fwht_8(x: torch.Tensor) -> torch.Tensor:
 _CACHE_3HCP: Dict[torch.device, torch.Tensor] = {}
 _CACHE_D4: Dict[torch.device, torch.Tensor] = {}
 _CACHE_E8: Dict[torch.device, torch.Tensor] = {}
-_CACHE_GOLAY_OCTADS: Dict[torch.device, torch.Tensor] = {}
+_CACHE_GOLAY_SHELLS: Dict[torch.device, Tuple[torch.Tensor, torch.Tensor]] = {}
 
 
 def get_3hcp_codebook(device: torch.device, dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -123,12 +123,12 @@ def get_e8_codebook(device: torch.device, dtype: torch.dtype = torch.float32) ->
     return _CACHE_E8[device].to(dtype)
 
 
-def get_golay24_octads(device: torch.device) -> torch.Tensor:
+def get_golay24_shells(device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Генерирует все 759 октад веса Хэмминга 8 расширенного двоичного кода Голея G₂₄
-    по порождающей матрице G = [I₁₂ | B₁₂] из Теоремы 6.1 (MarkovL1LeechAndLowRank.lean).
+    Генерирует все 759 октад (вес 8) и 759 кооктад (вес 16) расширенного кода Голея G₂₄
+    по порождающей матрице G = [I₁₂ | B₁₂] (MarkovL1LeechAndLowRank.lean).
     """
-    if device not in _CACHE_GOLAY_OCTADS:
+    if device not in _CACHE_GOLAY_SHELLS:
         qr_pal = 0b11011100010  # 1762_10
         basis: List[int] = []
         row0 = (1 << 23) | (qr_pal << 1)
@@ -139,16 +139,22 @@ def get_golay24_octads(device: torch.device) -> torch.Tensor:
             basis.append(row)
 
         octads: List[List[int]] = []
+        cooctads: List[List[int]] = []
         for m in range(1, 4096):
             cw = 0
             for bit in range(12):
                 if (m >> bit) & 1:
                     cw ^= basis[bit]
-            if cw.bit_count() == 8:
-                supp = [23 - pos for pos in range(24) if (cw >> pos) & 1]
-                octads.append(supp)
-        _CACHE_GOLAY_OCTADS[device] = torch.tensor(octads, device=device, dtype=torch.long)
-    return _CACHE_GOLAY_OCTADS[device]
+            wt = cw.bit_count()
+            if wt == 8:
+                octads.append([23 - pos for pos in range(24) if (cw >> pos) & 1])
+            elif wt == 16:
+                cooctads.append([23 - pos for pos in range(24) if (cw >> pos) & 1])
+        _CACHE_GOLAY_SHELLS[device] = (
+            torch.tensor(octads, device=device, dtype=torch.long),
+            torch.tensor(cooctads, device=device, dtype=torch.long),
+        )
+    return _CACHE_GOLAY_SHELLS[device]
     # =========================================================================
 # 3. ТОЧНЫЙ L1-ПОИСК МАСШТАБА И ВЕКТОРНЫЕ КВАНТОВАТЕЛИ РЕШЁТОК (3HCP, D₄, E₈, Λ₂₄)
 # =========================================================================
@@ -277,6 +283,30 @@ def quantize_e8_lattice(
     return w_hat, best_idx, scales
 
 
+def _eval_golay_shell(b_chunk: torch.Tensor, shell_pos: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Оценивает проекцию 24D блока на заданную оболочку кода Голея (октады 8 или кооктады 16)."""
+    gathered_abs = torch.abs(b_chunk)[:, shell_pos]           # (B, 759, k)
+    sel_idx = torch.argmax(gathered_abs.sum(dim=-1), dim=1)   # (B,)
+    sel_pos = shell_pos[sel_idx]                              # (B, k)
+
+    vals = torch.gather(b_chunk, 1, sel_pos)                  # (B, k)
+    signs = torch.where(vals >= 0, torch.ones_like(vals), -torch.ones_like(vals))
+
+    # Чётность отрицательных знаков (isLeech24OctadShell)
+    odd_mask = ((signs < 0).sum(dim=1) % 2) == 1
+    if odd_mask.any():
+        min_idx = torch.argmin(torch.abs(vals), dim=1)
+        signs[odd_mask, min_idx[odd_mask]] *= -1.0
+
+    signed_proj = vals * signs
+    alpha = _weighted_median_1d(torch.clamp(signed_proj, min=0.0), torch.ones_like(vals))  # (B, 1)
+
+    cand_block = torch.zeros_like(b_chunk)
+    cand_block.scatter_(1, sel_pos, signs * alpha)
+    err = torch.sum(torch.abs(b_chunk - cand_block), dim=1)
+    return cand_block, err, alpha.squeeze(1)
+
+
 @torch.no_grad()
 def quantize_leech24_lattice(
     weights: torch.Tensor,
@@ -285,7 +315,7 @@ def quantize_leech24_lattice(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Суб-1-битное векторное квантование 24-векторов в решётку Лича Λ₂₄ (~0.733 b/w)
-    через 759 октад расширенного двоичного кода Голея G₂₄ (projectLeech24OctadQ, Раздел 6.1).
+    по двум оболочкам кода Голея G₂₄: 759 октад (вес 8) + 759 кооктад (вес 16).
     """
     orig_shape = weights.shape
     flat = weights.reshape(-1).to(torch.float32)
@@ -299,43 +329,34 @@ def quantize_leech24_lattice(
     else:
         w_work = blocks
 
-    octads = get_golay24_octads(blocks.device)  # (759, 8)
+    octads, cooctads = get_golay24_shells(blocks.device)
     n = blocks.size(0)
-    best_octad = torch.zeros((n,), device=blocks.device, dtype=torch.int16)
+    best_shell = torch.zeros((n,), device=blocks.device, dtype=torch.int16)
     best_scale = torch.zeros((n,), device=blocks.device, dtype=torch.float32)
     q_rot = torch.zeros_like(w_work)
 
     for start in range(0, n, chunk_size):
         end = min(start + chunk_size, n)
-        b_chunk = w_work[start:end]  # (B, 24)
-        abs_b = torch.abs(b_chunk)   # (B, 24)
+        b_chunk = w_work[start:end]
 
-        gathered_abs = abs_b[:, octads]              # (B, 759, 8)
-        sel_oct = torch.argmax(gathered_abs.sum(dim=-1), dim=1)  # (B,)
-        sel_pos = octads[sel_oct]                    # (B, 8)
+        cand_oct, err_oct, alpha_oct = _eval_golay_shell(b_chunk, octads)
+        cand_coo, err_coo, alpha_coo = _eval_golay_shell(b_chunk, cooctads)
 
-        vals = torch.gather(b_chunk, 1, sel_pos)     # (B, 8)
-        signs = torch.where(vals >= 0, torch.ones_like(vals), -torch.ones_like(vals))
+        use_coo = err_coo < err_oct
+        cand_best = torch.where(use_coo.unsqueeze(1), cand_coo, cand_oct)
+        err_best = torch.where(use_coo, err_coo, err_oct)
+        alpha_best = torch.where(use_coo, alpha_coo, alpha_oct)
 
-        # Чётность отрицательных знаков (isLeech24OctadShell)
-        odd_mask = ((signs < 0).sum(dim=1) % 2) == 1
-        if odd_mask.any():
-            min_idx = torch.argmin(torch.abs(vals), dim=1)
-            signs[odd_mask, min_idx[odd_mask]] *= -1.0
-
-        signed_proj = vals * signs
-        alpha = _weighted_median_1d(torch.clamp(signed_proj, min=0.0), torch.ones_like(vals))  # (B, 1)
-
-        cand_block = torch.zeros_like(b_chunk)
-        cand_block.scatter_(1, sel_pos, signs * alpha)
-
-        err_cand = torch.sum(torch.abs(b_chunk - cand_block), dim=1)
         err_zero = torch.sum(torch.abs(b_chunk), dim=1)
-        use_zero = err_zero <= err_cand
+        use_zero = err_zero <= err_best
 
-        q_rot[start:end] = torch.where(use_zero.unsqueeze(1), torch.zeros_like(cand_block), cand_block)
-        best_octad[start:end] = torch.where(use_zero, torch.full_like(sel_oct, -1), sel_oct).to(torch.int16)
-        best_scale[start:end] = torch.where(use_zero, torch.zeros_like(alpha.squeeze(1)), alpha.squeeze(1))
+        q_rot[start:end] = torch.where(use_zero.unsqueeze(1), torch.zeros_like(cand_best), cand_best)
+        best_shell[start:end] = torch.where(
+            use_zero,
+            torch.full_like(use_coo, -1, dtype=torch.int16),
+            torch.where(use_coo, torch.ones_like(use_coo, dtype=torch.int16), torch.zeros_like(use_coo, dtype=torch.int16)),
+        )
+        best_scale[start:end] = torch.where(use_zero, torch.zeros_like(alpha_best), alpha_best)
 
     if use_hadamard:
         w_restored = (fwht_8(q_rot.view(-1, 8)) / 2.8284271247461903).view(-1, 24)
@@ -343,7 +364,7 @@ def quantize_leech24_lattice(
         w_restored = q_rot
 
     w_hat = w_restored.reshape(-1)[: weights.numel()].reshape(orig_shape).to(weights.dtype)
-    return w_hat, best_octad, best_scale
+    return w_hat, best_shell, best_scale
     # =========================================================================
 # 4. ТОЧНЫЙ КРИТИЧЕСКИЙ ТЕРНАРНЫЙ СОЛВЕР, АСИММЕТРИЧНЫЙ И СУПЕРКВАНТОВАТЕЛЬ
 # =========================================================================
@@ -471,7 +492,7 @@ class VCoreSuperQuantizer(nn.Module):
             "actual_l1_err": float(torch.sum(torch.abs(weights.to(torch.float32) - w_restored.to(torch.float32))).item()),
         }
         return w_restored, stats
-# =========================================================================
+    # =========================================================================
 # 5. ПОЛНЫЙ КОНВЕЙЕР ALGORITHM 1: IN-DOMAIN W₈ + E₈ + l1-LoRA + РЕГИСТР ВЫБРОСОВ
 # =========================================================================
 
@@ -524,7 +545,8 @@ class VCoreInDomainHadamardLinear(nn.Module):
             self.lora_u = None
             self.lora_v = None
 
-        self.register_buffer("outlier_indices", torch.empty((2, 0), dtype=torch.long))
+        self.register_buffer("outlier_rows", torch.empty((0,), dtype=torch.long))
+        self.register_buffer("outlier_cols", torch.empty((0,), dtype=torch.long))
         self.register_buffer("outlier_values", torch.empty((0,), dtype=torch.float16))
 
         if bias:
@@ -551,11 +573,12 @@ class VCoreInDomainHadamardLinear(nn.Module):
         eff_rank = min(lora_rank, out_f, in_f) if lora_rank > 0 else 0
         layer = cls(in_f, out_f, bias=(linear.bias is not None), lora_rank=eff_rank).to(dev)
 
-        # Сохраняем разреженный регистр выбросов в COO-формате
+        # Сохраняем разреженный регистр выбросов для быстрого index_add_ без sparse_coo предупреждений
         nz = torch.nonzero(w_reg, as_tuple=False)
         if nz.numel() > 0:
-            layer.outlier_indices = nz.T.contiguous()
-            layer.outlier_values = w_reg[nz[:, 0], nz[:, 1]].to(torch.float16)
+            layer.outlier_rows = nz[:, 0].contiguous()
+            layer.outlier_cols = nz[:, 1].contiguous()
+            layer.outlier_values = w_reg[layer.outlier_rows, layer.outlier_cols].to(torch.float16)
 
         # Шаг 2-3: Поворот W₈ и проекция на решётку E₈ в W₈-базисе
         w_rot = fwht_8(w_main.reshape(-1, 8))
@@ -598,17 +621,13 @@ class VCoreInDomainHadamardLinear(nn.Module):
             out = out + (x_2d @ self.lora_v.to(torch.float32).T) @ self.lora_u.to(torch.float32).T
 
         if self.outlier_values.numel() > 0:
-            w_sparse = torch.sparse_coo_tensor(
-                self.outlier_indices,
-                self.outlier_values.to(torch.float32),
-                size=(self.out_features, self.in_features),
-            )
-            out = out + torch.sparse.mm(w_sparse, x_2d.T).T
+            contrib = x_2d[:, self.outlier_cols] * self.outlier_values.to(torch.float32).unsqueeze(0)
+            out.index_add_(1, self.outlier_rows, contrib)
 
         if self.bias is not None:
             out = out + self.bias.to(torch.float32)
         return out.to(x.dtype).reshape(*orig_shape[:-1], self.out_features)
-# =========================================================================
+        # =========================================================================
 # 6. 2:4 РАЗРЕЖЕННОСТЬ, DATA-FREE ℓ₁-LORA (С BACKFITTING), ℓ₁-GPTQ, MoE И FREIVALDS
 # =========================================================================
 
@@ -842,5 +861,4 @@ def quantize_model_vcore(
     return {
         "quantized_layers": float(replaced),
         "max_certified_row_l1_bound": max_cert_err,
-            }
-    
+}
