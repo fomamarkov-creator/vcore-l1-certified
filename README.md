@@ -19,7 +19,7 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 ## Full Stack Capabilities
 
 1. **Formal Lean 4 Verification (`CertifierMain.lean` → `vcore_certifier`):**
-   * Links directly against all 12 verified modules of `l1-projection-complexity-lean4` (`v4.0.0`)—including `MarkovL1TernaryQuantizer`, `MarkovL1WeightedTernary`, and `MarkovL1TreewidthSolver`, 'MarkovL1ContinuousChainDP','MarkovL1TriangularActivation','MarkovL1GeneralTreewidthFPT'—to certify exact-rational (\(\mathbb{Q}\)) optimality prior to GPU execution.
+   * Links directly against all 21 verified modules of `l1-projection-complexity-lean4` (`v5.0.0`)—including `MarkovL1TernaryQuantizer`, `MarkovL1WeightedTernary`, and `MarkovL1TreewidthSolver`, 'MarkovL1ContinuousChainDP','MarkovL1TriangularActivation','MarkovL1GeneralTreewidthFPT'—to certify exact-rational (\(\mathbb{Q}\)) optimality prior to GPU execution.
 2. **Activation-Weighted \(\ell_1\) Medians, Treewidth FPT & Channel Outlier Grouping (`vcore_l1/`):**
    * Sorts weight columns by \(\ell_1\)-norm (`vcore_perm`) to isolate heavy-tailed outliers into dedicated Δ = 1 blocks.
    * Supports activation-importance weights (`--calib-samples`, \(\gamma_j = \mathbb{E}[\vert{}x_j\vert{}]\)) to protect salient input channels via exact weighted \(\ell_1\) medians, plus `solve_chain_overlap_fpt` for structured Δ = 2 chain overlaps.
