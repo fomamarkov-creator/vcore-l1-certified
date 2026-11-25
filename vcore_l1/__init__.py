@@ -49,10 +49,21 @@ from .super_quantizer import (
     verify_moe_routing_safety,
     verify_matmul_freivalds,
 )
+from .v4_engine import (
+    fwht_16,
+    fwht_32,
+    quantize_barnes_wall32_lattice,
+    VCoreLUTLinear,
+    MixedLatticeAssignment,
+    allocate_mixed_lattice,
+    certify_transformer_block_e2e,
+    verify_rope_key_drift,
+    golay24_syndrome_decode,
+)
 from .tui import VCoreTerminalStudio
 from .web_ui import run_web_server
 
-__version__ = "3.0.0"
+__version__ = "4.0.0"
 __all__ = [
     "VCoreTernaryQuantizer",
     "verify_with_lean4_engine",
@@ -83,16 +94,25 @@ __all__ = [
     "MARKOV_LE0_GAP",
     "fwht_4",
     "fwht_8",
+    "fwht_16",
+    "fwht_32",
     "get_3hcp_codebook",
     "get_d4_codebook",
     "get_e8_codebook",
     "quantize_3hcp_lattice",
     "quantize_d4_lattice",
     "quantize_e8_lattice",
+    "quantize_barnes_wall32_lattice",
     "quantize_asym_ternary",
     "quantize_residual_2stage",
     "VCoreSuperQuantizer",
     "VCoreInDomainHadamardLinear",
+    "VCoreLUTLinear",
+    "MixedLatticeAssignment",
+    "allocate_mixed_lattice",
+    "certify_transformer_block_e2e",
+    "verify_rope_key_drift",
+    "golay24_syndrome_decode",
     "register_inversion_split",
     "quantize_24_sparse_l1",
     "fit_datafree_l1_lora",
