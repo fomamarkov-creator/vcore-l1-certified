@@ -26,10 +26,33 @@ from .safetensors_quantizer import (
     repack_sharded_model,
     repack_hf_hub_model,
 )
+from .super_quantizer import (
+    MARKOV_LAMBDA_LIMIT,
+    MARKOV_N_BASE,
+    MARKOV_ZETA_RATIO,
+    MARKOV_LE0_GAP,
+    fwht_4,
+    fwht_8,
+    get_3hcp_codebook,
+    get_d4_codebook,
+    get_e8_codebook,
+    quantize_3hcp_lattice,
+    quantize_d4_lattice,
+    quantize_e8_lattice,
+    quantize_asym_ternary,
+    quantize_residual_2stage,
+    VCoreSuperQuantizer,
+    VCoreInDomainHadamardLinear,
+    register_inversion_split,
+    quantize_24_sparse_l1,
+    fit_datafree_l1_lora,
+    verify_moe_routing_safety,
+    verify_matmul_freivalds,
+)
 from .tui import VCoreTerminalStudio
 from .web_ui import run_web_server
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 __all__ = [
     "VCoreTernaryQuantizer",
     "verify_with_lean4_engine",
@@ -54,6 +77,27 @@ __all__ = [
     "repack_safetensors_layerwise",
     "repack_sharded_model",
     "repack_hf_hub_model",
+    "MARKOV_LAMBDA_LIMIT",
+    "MARKOV_N_BASE",
+    "MARKOV_ZETA_RATIO",
+    "MARKOV_LE0_GAP",
+    "fwht_4",
+    "fwht_8",
+    "get_3hcp_codebook",
+    "get_d4_codebook",
+    "get_e8_codebook",
+    "quantize_3hcp_lattice",
+    "quantize_d4_lattice",
+    "quantize_e8_lattice",
+    "quantize_asym_ternary",
+    "quantize_residual_2stage",
+    "VCoreSuperQuantizer",
+    "VCoreInDomainHadamardLinear",
+    "register_inversion_split",
+    "quantize_24_sparse_l1",
+    "fit_datafree_l1_lora",
+    "verify_moe_routing_safety",
+    "verify_matmul_freivalds",
     "VCoreTerminalStudio",
     "run_web_server",
 ]
