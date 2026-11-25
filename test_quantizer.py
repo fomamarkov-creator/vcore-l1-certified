@@ -17,11 +17,19 @@ from vcore_l1 import (
     MARKOV_LE0_GAP,
     fwht_4,
     fwht_8,
+    fwht_16,
+    fwht_32,
     quantize_3hcp_lattice,
     quantize_d4_lattice,
     quantize_e8_lattice,
+    quantize_barnes_wall32_lattice,
     VCoreSuperQuantizer,
     VCoreInDomainHadamardLinear,
+    VCoreLUTLinear,
+    allocate_mixed_lattice,
+    certify_transformer_block_e2e,
+    verify_rope_key_drift,
+    golay24_syndrome_decode,
     register_inversion_split,
     quantize_24_sparse_l1,
     fit_datafree_l1_lora,
@@ -38,7 +46,7 @@ def absmean_bitnet_quantize(weights: torch.Tensor) -> torch.Tensor:
 
 
 def main():
-    print("=== 1. Проверка математического ядра Lean 4 (v5.0.0 — 21 модуль) ===")
+    print("=== 1. Проверка математического ядра Lean 4 (v6.0.0 — 23 модуля) ===")
     print(verify_with_lean4_engine().strip())
 
     print("\n=== 2. Сравнение с BitNet (absmean), Activation-Weighted L1 и Triangular Feedback ===")
@@ -65,7 +73,6 @@ def main():
     R_upper = torch.linalg.cholesky(cov).T
     w_tri, _, _ = quantize_ternary_triangular_feedback(weights, R_upper, group_size=32)
     assert w_tri.shape == weights.shape
-
     print("\n=== 3. Тест каскада (1.58-bit -> INT4 -> FP16), VCoreDynamicCache и VRAM Budget ===")
     with tempfile.TemporaryDirectory() as tmpdir:
         in_dir = os.path.join(tmpdir, "model_in")
@@ -120,18 +127,23 @@ def main():
     grid_tw2 = torch.tensor([-2.0, 0.0, 2.0, 4.0])
     c_tw2, tw2_cost = solve_triple_overlap_fpt(w_triple, grid=grid_tw2)
     assert c_tw2.shape == (4,) and abs(tw2_cost - 6.0) < 1e-5
-
-    print("\n=== 4. Тест модулей 13–21: Решётки 3HCP / D₄ / E₈ (<1b), W₈ Hadamard, 2:4, ℓ₁-LoRA, MoE, Freivalds ===")
+        print("\n=== 4. Тест модулей 13–23: Решётки 3HCP / D₄ / E₈ / Λ₃₂, W₃₂, LUT, Mixed-Lattice, RoPE, Golay G₂₄ ===")
     v4 = torch.randn(16, 4)
     assert torch.allclose(fwht_4(fwht_4(v4)), v4, atol=1e-5)
     v8 = torch.randn(16, 8)
     assert torch.allclose(fwht_8(fwht_8(v8)), 8.0 * v8, atol=1e-4)
+    v16 = torch.randn(8, 16)
+    assert torch.allclose(fwht_16(fwht_16(v16)), 16.0 * v16, atol=1e-4)
+    v32 = torch.randn(8, 32)
+    assert torch.allclose(fwht_32(fwht_32(v32)), 32.0 * v32, atol=1e-3)
 
     w_test = torch.randn(64, 128)
     w_3hcp, _, _ = quantize_3hcp_lattice(w_test)
     w_d4, _, _ = quantize_d4_lattice(w_test)
     w_e8, idx_e8, _ = quantize_e8_lattice(w_test, use_hadamard=True)
+    w_bw32, _, _ = quantize_barnes_wall32_lattice(w_test, use_hadamard32=True)
     assert w_3hcp.shape == w_test.shape and w_d4.shape == w_test.shape and w_e8.shape == w_test.shape
+    assert w_bw32.shape == w_test.shape
     assert idx_e8.dtype == torch.uint8 and idx_e8.numel() == (64 * 128) // 8
 
     sq = VCoreSuperQuantizer(rel_error_budget=0.30)
@@ -140,10 +152,25 @@ def main():
 
     lin_fp = nn.Linear(128, 64, bias=True)
     lin_w8 = VCoreInDomainHadamardLinear.from_linear(lin_fp)
+    lin_lut = VCoreLUTLinear.from_linear(lin_fp, lora_rank=16, lora_iters=6)
     x_in = torch.randn(8, 128)
     y_fp = lin_fp(x_in)
     y_w8 = lin_w8(x_in)
+    y_lut = lin_lut(x_in)
     assert y_w8.shape == y_fp.shape
+    assert torch.allclose(y_w8, y_lut, atol=1e-3)
+
+    _, mix_sum = allocate_mixed_lattice(
+        [("attn.v_proj", 10_000_000, 0.02), ("mlp.gate_proj", 50_000_000, 0.015), ("mlp.up_proj", 50_000_000, 0.015)],
+        target_avg_bpw=0.82,
+    )
+    assert mix_sum["certified_budget_ok"] == 1.0
+    assert certify_transformer_block_e2e(0.01, 0.005, 0.005, 0.01, 0.01, 0.01, 2.0) > 0.0
+
+    ok_rope, _ = verify_rope_key_drift(torch.ones(4, 2), torch.zeros(4, 2), torch.full((4, 2), 0.05), max_drift_bound=0.25)
+    assert ok_rope
+    cw_clean, syn_after = golay24_syndrome_decode((1 << 5) ^ (1 << 11))
+    assert syn_after != 0 and cw_clean == 0
 
     assert abs(MARKOV_LE0_GAP - 0.024) < 1e-7
     w_out = torch.tensor([10.0, 300.0, -5.0, -400.0])
@@ -169,8 +196,8 @@ def main():
     assert not verify_matmul_freivalds(A_m, B_m, C_m + 0.5)
 
     print(
-        f"[OK] Все компоненты v3.0.0 (Lean 4 21-Module Core, E8 Sub-1-Bit [{sq_stats['avg_bits_per_weight']:.2f} b/w], "
-        f"In-Domain W8, 2:4 Sparse, ℓ₁-LoRA [{err_before:.1f} -> {err_after:.1f}], Freivalds) работают!"
+        f"[OK] Все компоненты v4.0.0 (Lean 4 23-Module Core, E8/Λ32 Sub-1-Bit [{mix_sum['avg_bpw']:.2f} b/w], "
+        f"LUT Kernel, Rational RoPE, Golay G24 Syndrome, ℓ₁-LoRA [{err_before:.1f} -> {err_after:.1f}]) работают!"
     )
 
     subprocess.run(["vcore-bench", "--hidden-size", "256", "--out-size", "256", "--steps", "10"], check=True)
@@ -178,4 +205,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
