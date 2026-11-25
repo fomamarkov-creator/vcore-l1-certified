@@ -14,6 +14,19 @@ from vcore_l1 import (
     solve_continuous_chain_dp,
     solve_triple_overlap_fpt,
     quantize_ternary_triangular_feedback,
+    MARKOV_LE0_GAP,
+    fwht_4,
+    fwht_8,
+    quantize_3hcp_lattice,
+    quantize_d4_lattice,
+    quantize_e8_lattice,
+    VCoreSuperQuantizer,
+    VCoreInDomainHadamardLinear,
+    register_inversion_split,
+    quantize_24_sparse_l1,
+    fit_datafree_l1_lora,
+    verify_moe_routing_safety,
+    verify_matmul_freivalds,
 )
 
 
@@ -25,7 +38,7 @@ def absmean_bitnet_quantize(weights: torch.Tensor) -> torch.Tensor:
 
 
 def main():
-    print("=== 1. Проверка математического ядра Lean 4 (v4.0.0 — 12 модулей) ===")
+    print("=== 1. Проверка математического ядра Lean 4 (v5.0.0 — 21 модуль) ===")
     print(verify_with_lean4_engine().strip())
 
     print("\n=== 2. Сравнение с BitNet (absmean), Activation-Weighted L1 и Triangular Feedback ===")
@@ -46,7 +59,6 @@ def main():
     weighted_err_aware = torch.sum(act_imp.view(1, -1) * torch.abs(weights - w_weighted)).item()
     assert weighted_err_aware <= weighted_err_unweighted
 
-    # Проверка треугольной компенсации корреляций активаций (MarkovL1TriangularActivation)
     X_calib = torch.randn(64, 256)
     X_calib[:, 1] = 0.85 * X_calib[:, 0] + 0.15 * X_calib[:, 1]
     cov = (X_calib.T @ X_calib) / 64.0 + 1e-3 * torch.eye(256)
@@ -86,7 +98,6 @@ def main():
         assert isinstance(net.fc2, VCoreLinear)
         assert {net.fc1.bits, net.fc2.bits} == {2, 4}
 
-        # Тест батча из 4 токенов (проверка нового тайлового GEMM-ядра)
         y_out = net(torch.randn(4, 128, dtype=torch.float16))
         assert y_out.shape == (4, 32)
 
@@ -97,12 +108,9 @@ def main():
     k_cat, v_cat = cache.update(k2, v2, layer_idx=0)
     assert k_cat.shape == (1, 4, 9, 64) and cache.get_seq_length() == 9
 
-    # Проверка сеточного и непрерывного FPT (Δ = 2, treewidth k = 1) + Δ = 3 (treewidth k = 2)
     w_chain = torch.tensor([4.0, 0.0, -4.0, 0.0])
     c_opt, fpt_cost = solve_chain_overlap_fpt(w_chain, num_grid=9)
     assert c_opt.shape == (4,) and abs(fpt_cost - 8.0) < 1e-6
-
-
 
     w_cont = torch.tensor([4.0, 8.0, 4.0])
     c_cont, cont_cost = solve_continuous_chain_dp(w_cont)
@@ -113,8 +121,59 @@ def main():
     c_tw2, tw2_cost = solve_triple_overlap_fpt(w_triple, grid=grid_tw2)
     assert c_tw2.shape == (4,) and abs(tw2_cost - 6.0) < 1e-5
 
+    print("\n=== 4. Тест модулей 13–21: Решётки 3HCP / D₄ / E₈ (<1b), W₈ Hadamard, 2:4, ℓ₁-LoRA, MoE, Freivalds ===")
+    v4 = torch.randn(16, 4)
+    assert torch.allclose(fwht_4(fwht_4(v4)), v4, atol=1e-5)
+    v8 = torch.randn(16, 8)
+    assert torch.allclose(fwht_8(fwht_8(v8)), 8.0 * v8, atol=1e-4)
+
+    w_test = torch.randn(64, 128)
+    w_3hcp, _, _ = quantize_3hcp_lattice(w_test)
+    w_d4, _, _ = quantize_d4_lattice(w_test)
+    w_e8, idx_e8, _ = quantize_e8_lattice(w_test, use_hadamard=True)
+    assert w_3hcp.shape == w_test.shape and w_d4.shape == w_test.shape and w_e8.shape == w_test.shape
+    assert idx_e8.dtype == torch.uint8 and idx_e8.numel() == (64 * 128) // 8
+
+    sq = VCoreSuperQuantizer(rel_error_budget=0.30)
+    w_sq, sq_stats = sq.quantize(w_test)
+    assert sq_stats["actual_l1_err"] <= sq_stats["certified_max_l1_err"] + 1e-4
+
+    lin_fp = nn.Linear(128, 64, bias=True)
+    lin_w8 = VCoreInDomainHadamardLinear.from_linear(lin_fp)
+    x_in = torch.randn(8, 128)
+    y_fp = lin_fp(x_in)
+    y_w8 = lin_w8(x_in)
+    assert y_w8.shape == y_fp.shape
+
+    assert abs(MARKOV_LE0_GAP - 0.024) < 1e-7
+    w_out = torch.tensor([10.0, 300.0, -5.0, -400.0])
+    main_ch, reg_out = register_inversion_split(w_out, limit=256.0)
+    assert torch.allclose(main_ch + reg_out, w_out)
+    assert torch.max(torch.abs(main_ch)).item() < 256.0
+
+    w_sp = quantize_24_sparse_l1(torch.randn(32, 64))
+    nnz_per_block = torch.count_nonzero(w_sp.view(-1, 4), dim=1)
+    assert int(torch.max(nnz_per_block).item()) <= 2
+
+    residual = w_test - w_e8
+    err_before = torch.sum(torch.abs(residual)).item()
+    U_lora, V_lora = fit_datafree_l1_lora(residual, rank=8, iters=4)
+    err_after = torch.sum(torch.abs(residual - U_lora @ V_lora)).item()
+    assert err_after < err_before
+
+    assert verify_moe_routing_safety(torch.tensor([3.0, 2.5, 1.0, 0.2]), torch.tensor([0.1, 0.1, 0.1, 0.1]), top_k=2)
+    A_m = torch.randn(32, 64)
+    B_m = torch.randn(64, 32)
+    C_m = A_m @ B_m
+    assert verify_matmul_freivalds(A_m, B_m, C_m)
+    assert not verify_matmul_freivalds(A_m, B_m, C_m + 0.5)
+
+    print(
+        f"[OK] Все компоненты v3.0.0 (Lean 4 21-Module Core, E8 Sub-1-Bit [{sq_stats['avg_bits_per_weight']:.2f} b/w], "
+        f"In-Domain W8, 2:4 Sparse, ℓ₁-LoRA [{err_before:.1f} -> {err_after:.1f}], Freivalds) работают!"
+    )
+
     subprocess.run(["vcore-bench", "--hidden-size", "256", "--out-size", "256", "--steps", "10"], check=True)
-    print("[OK] Все компоненты v2.0.0 (Lean 4 v4.0.0, Continuous DP, Triangular Feedback, Tiled CUDA GEMM) работают!")
 
 
 if __name__ == "__main__":
