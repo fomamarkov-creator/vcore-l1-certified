@@ -42,8 +42,9 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 ---
 ![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
 
-![V-CORE vs BitNet Outlier Stress-Test]
-(assets/vcore_sub1_benchmark.png)
+
+
+![V-CORE vs BitNet Test](assets/vcore_sub1_benchmark.png)
 
 ## Benchmarks (NVIDIA Tesla T4 GPU)
 
