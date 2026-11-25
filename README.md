@@ -103,6 +103,26 @@ Evaluated on a `1024 × 1024` heavy-tailed weight matrix (`group_size=32`, chann
 - **Lean 4 Formal Certificate Verification (`vcore_certifier`):**
   - **10/10 certificates verified** in exact rational arithmetic $\mathbb{Q}$ at **`0.5 ms/certificate`**.
   - 
+### 7. Sub-1-Bit Root Lattices ($E_8$, $D_4$, $3\text{HCP}$, Leech $\Lambda_{24}$), $\ell_1$-LoRA & $\ell_1$-GPTQ
+
+Evaluated on real weights (`Qwen2.5-0.5B-Instruct`, `layers.0.mlp.gate_proj`) and heavy-tailed correlated benchmarks (`vcore-l1-certified v3.0.0`):
+
+| Quantization Method / Lattice Mode | Bits / Weight | Real LLM $W_{\ell_1}$ | Real LLM Output $\ell_1$ | Rel. Gain vs. BitNet |
+| :--- | :---: | :---: | :---: | :---: |
+| **RTN (Block Max-Scale)** | `1.585` | 53,990.8 | 5,528.8 | -49.5% |
+| **BitNet `absmean` (1.58-bit)** | `1.585` | 36,105.3 | 4,423.9 | Baseline |
+| **V-CORE 1.58-Bit Critical-Threshold** | `1.585` | **31,813.6** | **3,774.1** | **+11.9%** |
+| **V-CORE 3D `3HCP` Lattice (13-state)** | `1.233` | 37,246.5 | 5,319.1 | -3.2% |
+| **V-CORE 4D $D_4$ Lattice (25-state)** | `1.161` | 45,150.1 | 5,997.1 | -25.1% |
+| **V-CORE 8D $E_8$ Lattice (241-state, $W_8$)** | `0.989` | 48,593.1 | 5,211.0 | -34.6% |
+| **V-CORE 8D $E_8$ + Data-Free $\ell_1$-LoRA ($r=16$)** | `1.020` | 46,240.6 | 5,023.9 | -28.1% |
+| **V-CORE Hardware 2:4 Structured Sparse $\ell_1$** | `0.792` | **33,488.1** | **3,748.6** | **+7.2%** |
+| **V-CORE 24D Leech $\Lambda_{24}$ ($\mathcal{G}_{24}$ Octads/Cooctads)** | `0.733` | 45,798.4 | 4,934.8 | -26.8% |
+
+* **End-to-End Sub-1-Bit Packing (`VCoreInDomainHadamardLinear`, $E_8 + \ell_1$-LoRA $r=16$):** Compresses FP16 linear blocks by **4.73×** (`8,198.0 KB -> 1,734.0 KB`) with machine-checked row-wise $\ell_1$ Hölder certificates (`MaxOutputDrift <= HolderCert`, 100% verified).
+* **Triangular Activation Correlation Feedback ($\ell_1$-GPTQ):** Reduces correlated-activation output $\ell_1$ distortion by **+33.8%** (`199,321.7 -> 131,981.5`).
+* **MoE Top-$K$ & $O(n^2)$ Freivalds Runtime Audit:** Verifies $1024 \times 1024$ matrix-multiplication integrity in **5.92 ms** on CPU.
+*
 
 ## Installation & Quick Start
 
