@@ -1,5 +1,5 @@
 name = "VCoreL1Certified"
-version = "3.0.0"
+version = "4.0.0"
 keywords = ["math", "lean4", "cuda", "quantization", "verified-solver", "banach-spaces", "lattice-quantization"]
 defaultTargets = ["vcore_certifier"]
 
