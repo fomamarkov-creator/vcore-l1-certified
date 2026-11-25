@@ -31,6 +31,7 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
    * Loads compressed models in one line via `VCoreModelForCausalLM.from_vcore_pretrained(...)`.
    * Compresses autoregressive context memory on the fly via `VCoreDynamicCache`.
    * Runs `vcore_fused_ternary_gemv_warp for single-token decoding and shared-memory tiled uint32 vcore_fused_ternary_gemm_tiled for long-context prefill` (32-thread warp reduction with `__shfl_down_sync` and 32-bit `uint32` register loads) directly on 2-bit packed `uint8` weights without unpacking to `float32` in VRAM (`sm_70`–`sm_90`).
+   * 
 
 5. **Sub-1-Bit Root Lattices, In-Domain Hadamard `W₈` & `ℓ₁`-LoRA (`vcore_l1/super_quantizer.py`):**
    * **Vector Lattice Quantizers:** Quantizes weight tuples directly into verified coordination shells of **`3HCP`** (13 states, `1.23 b/w`), **`D₄`** (25 states, `1.16 b/w`), and **`E₈`** (241 states, `0.989 b/w`, packed 8 weights per byte `uint8`) via `quantize_3hcp_lattice`, `quantize_d4_lattice`, and `quantize_e8_lattice`.
@@ -67,7 +68,9 @@ Evaluated on real projection weights (`Qwen2.5-0.5B-Instruct`, `layers.0.mlp.gat
 
 | Model | Original Size | V-CORE Size | GGUF Size | Compression | Rel. ℓ₁ Error | Pre-built Hugging Face GGUF |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Qwen/Qwen2.5-0.5B-Instruct** | 942.3 MB | 453.7 MB | — | **2.08×** | 10.76% | — |
+
+| **Qwen/Qwen2.5-0.5B-Instruct** | 942.3 MB | 453.7 MB | 717.8 MB | **2.08×** | 10.76% | `MarkovEfim/Qwen2.5-0.5B-Instruct-V-CORE-L1-GGUF` |
+(https://huggingface.co/MarkovEfim/Qwen2.5-0.5B-Instruct-V-CORE-L1-GGUF) |
 | **Qwen/Qwen2.5-1.5B-Instruct** | 2,944.4 MB | 1,152.3 MB | 1,599.9 MB | **2.56×** | 10.63% | [MarkovEfim/Qwen2.5-1.5B-Instruct-V-CORE-L1-GGUF](https://huggingface.co/MarkovEfim/Qwen2.5-1.5B-Instruct-V-CORE-L1-GGUF) |
 | **Qwen/Qwen2.5-7B-Instruct** | 14,525.7 MB | 5,588.9 MB | 5,587.0 MB | **2.60×** | 10.66% | [MarkovEfim/Qwen2.5-7B-Instruct-V-CORE-L1-GGUF](https://huggingface.co/MarkovEfim/Qwen2.5-7B-Instruct-V-CORE-L1-GGUF) |
 
@@ -79,6 +82,7 @@ Measured across all 151,936 vocabulary logits against the unquantized FP16 basel
 | :--- | :---: | :---: | :---: |
 | **Perplexity (`1.5B`, 151,936 vocab)** | 14.646 | **15.254** | **+0.607 (+4.1%)** |
 | **Logit Cosine Similarity (`1.5B`)** | 1.0000 | **0.9617** | **96.2% alignment** |
+| **Logit Cosine Similarity (`0.5B`, 151,936 vocab)** | 1.0000 | **0.9542** | **95.4% alignment** |
 | **Multi-Step Vector ℓ₁ Norm (`7B` GGUF)** | Exact (`12`) | **Exact (`12`)** | Verified in `llama.cpp` (`Q4_0` + `F16`) |
 
 ### 5. Ablation Study: Component-Wise \(\ell_1\) Error Reduction (1.58-Bit)
@@ -102,7 +106,11 @@ Evaluated on a `1024 × 1024` heavy-tailed weight matrix (`group_size=32`, chann
   - Scales linearly from `12.78 ms` ($m=128$) to `57.10 ms` ($m=512$) and `114.39 ms` ($m=1024$).
 - **Lean 4 Formal Certificate Verification (`vcore_certifier`):**
   - **10/10 certificates verified** in exact rational arithmetic $\mathbb{Q}$ at **`0.5 ms/certificate`**.
-  - 
+  -
+
+-   * *Benchmarked on `Qwen2.5-0.5B-Instruct` (CPU AVX2): `mmap` load in **2.68 s**, standalone generation at **2.45 tokens/s**.*
+    *
+  -
 ### 7. Sub-1-Bit Root Lattices ($E_8$, $D_4$, $3\text{HCP}$, Leech $\Lambda_{24}$), $\ell_1$-LoRA & $\ell_1$-GPTQ
 
 Evaluated on real weights (`Qwen2.5-0.5B-Instruct`, `layers.0.mlp.gate_proj`) and heavy-tailed correlated benchmarks (`vcore-l1-certified v3.0.0`):
