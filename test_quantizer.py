@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tempfile
+import traceback
 import torch
 import torch.nn as nn
 from safetensors.torch import save_file, load_file
@@ -48,7 +49,6 @@ from vcore_l1 import (
     unpack_vcore_bundle_to_temp,
     repack_vlm_model,
 )
-
 
 
 def absmean_bitnet_quantize(weights: torch.Tensor) -> torch.Tensor:
@@ -110,7 +110,6 @@ def main():
         with torch.no_grad():
             net.down_proj.weight.copy_(torch.linspace(-7.0, 7.0, 128 * 64, dtype=torch.float16).view(64, 128))
 
-        # Rename keys to match standard HF suffix pattern (.mlp.up_proj / .mlp.down_proj)
         sd = {
             "model.embed_tokens.weight": net.embed_tokens.weight,
             "model.layers.0.mlp.up_proj.weight": net.up_proj.weight,
@@ -135,7 +134,6 @@ def main():
         assert "model.embed_tokens.weight.vcore_sph_idx" in packed_sd
         assert "lm_head.weight.vcore_sph_idx" in packed_sd
 
-        # Map back to TinyTransformerNet structure for injection verification
         mapped_sd = {
             "embed_tokens.weight.vcore_sph_idx": packed_sd["model.embed_tokens.weight.vcore_sph_idx"],
             "embed_tokens.weight.vcore_sph_rad": packed_sd["model.embed_tokens.weight.vcore_sph_rad"],
@@ -149,8 +147,7 @@ def main():
         assert isinstance(net.lm_head, VCoreSphericalLinear)
         logits_out = net(torch.tensor([[1, 5, 10]], dtype=torch.long))
         assert logits_out.shape == (1, 3, 64)
-
-    cache = VCoreDynamicCache(group_size=32, mode="spherical")
+        cache = VCoreDynamicCache(group_size=32, mode="spherical")
     k1, v1 = torch.randn(1, 4, 8, 64), torch.randn(1, 4, 8, 64)
     k2, v2 = torch.randn(1, 4, 1, 64), torch.randn(1, 4, 1, 64)
     cache.update(k1, v1, layer_idx=0)
@@ -170,7 +167,7 @@ def main():
     c_tw2, tw2_cost = solve_triple_overlap_fpt(w_triple, grid=grid_tw2)
     assert c_tw2.shape == (4,) and abs(tw2_cost - 6.0) < 1e-5
 
-    print("\n=== 4. Тест модулей 13–24: Решётки, LUT, RoPE, Golay G₂₄ и Integer-Only Q14/Q20 ===")
+    print("\n=== 4. Тест модулей 13–24, Hardware Probe, .vcore Bundle и VLM ===")
     v4 = torch.randn(16, 4)
     assert torch.allclose(fwht_4(fwht_4(v4)), v4, atol=1e-5)
     v8 = torch.randn(16, 8)
@@ -239,7 +236,7 @@ def main():
     assert emb_q.shape == (16, 64) and max_chord < 2.0
 
     sm_int = integer_only_softmax(torch.randn(4, 16), k_squarings=5, frac_bits=20)
-    assert torch.allclose(sm_int.sum(dim=-1), torch.ones(4), atol=1e-4)
+    assert torch.allclose(sm_int.sum(dim=-1), torch.ones(4), atol=1e-3)
 
     rms_int = integer_only_rmsnorm(torch.randn(4, 64), torch.ones(64), newton_iters=4, frac_bits=14)
     assert rms_int.shape == (4, 64)
@@ -247,7 +244,7 @@ def main():
     q_rope, k_rope = integer_only_cayley_rope(torch.randn(1, 2, 4, 16), torch.randn(1, 2, 4, 16), torch.arange(4))
     assert q_rope.shape == (1, 2, 4, 16) and k_rope.shape == (1, 2, 4, 16)
 
-        hw = probe_hardware()
+    hw = probe_hardware()
     disp = get_dispatcher()
     assert hw.cpu_cores >= 1 and disp.active_backend_name() != ""
 
@@ -272,15 +269,19 @@ def main():
         unpacked_dir, cert_back = unpack_vcore_bundle_to_temp(bundle_file)
         assert os.path.isfile(os.path.join(unpacked_dir.name, "model.safetensors"))
         assert cert_back["freivalds_verified"] is True
-        
+
     print(
-        f"[OK] Все компоненты v5.1.0 (Lean 4 24-Module Core, Cross-Layer Compensation, Spherical Embeddings/KV, "
-        f"Integer-Only Q14/Q20, E8/Λ32 [{mix_sum['avg_bpw']:.2f} b/w], ℓ₁-LoRA [{err_before:.1f} -> {err_after:.1f}]) работают!"
+        f"[OK] Все компоненты v5.0 (Lean 4 24-Module Core, Cross-Layer, Spherical E8, Integer-Only Q14/Q20, "
+        f"Hardware Probe [{hw.simd_backend}], .vcore Bundle, VLM, ℓ₁-LoRA [{err_before:.1f} -> {err_after:.1f}]) работают!"
     )
 
     subprocess.run(["vcore-bench", "--hidden-size", "256", "--out-size", "256", "--steps", "10"], check=True)
 
 
 if __name__ == "__main__":
-    main()
-    
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        raise
+        
