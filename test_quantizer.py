@@ -281,7 +281,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        traceback.print_exc()
-        raise
-        
+    except Exception as err:
+        print("\n================ [CI ERROR TRACEBACK] ================", flush=True)
+        traceback.print_exc(file=os.sys.stdout)
+        print(f"================ [FAILED: {type(err).__name__}: {err}] ================", flush=True)
+        os.sys.exit(1)
