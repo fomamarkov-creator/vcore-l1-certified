@@ -92,6 +92,16 @@ from .v5_engine import (
 from .tui import VCoreTerminalStudio
 from .web_ui import run_web_server
 
+from .dyadic_vnode import (
+    VCORE_LOGIC_ID,
+    VNodeBlock,
+    decompose_to_dyadic_vnodes,
+    get_vcore_ironclad_stamp,
+)
+from .streaming_cache import VCoreStreamingCache
+from .speculative import VCoreSpeculativeGenerator, build_e8_draft_model
+from .hub_publisher import generate_model_card_readme, publish_vcore_to_hub
+
 __version__ = "5.0.0"
 __all__ = [
     "VCoreTernaryQuantizer",
@@ -175,4 +185,13 @@ __all__ = [
     "integer_rmsnorm",
     "VCoreTerminalStudio",
     "run_web_server",
+    "VCORE_LOGIC_ID",
+    "VNodeBlock",
+    "decompose_to_dyadic_vnodes",
+    "get_vcore_ironclad_stamp",
+    "VCoreStreamingCache",
+    "VCoreSpeculativeGenerator",
+    "build_e8_draft_model",
+    "generate_model_card_readme",
+    "publish_vcore_to_hub",
 ]
