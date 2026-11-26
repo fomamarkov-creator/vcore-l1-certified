@@ -73,6 +73,7 @@ def main():
     R_upper = torch.linalg.cholesky(cov).T
     w_tri, _, _ = quantize_ternary_triangular_feedback(weights, R_upper, group_size=32)
     assert w_tri.shape == weights.shape
+
     print("\n=== 3. Тест каскада (1.58-bit -> INT4 -> FP16), VCoreDynamicCache и VRAM Budget ===")
     with tempfile.TemporaryDirectory() as tmpdir:
         in_dir = os.path.join(tmpdir, "model_in")
@@ -127,7 +128,8 @@ def main():
     grid_tw2 = torch.tensor([-2.0, 0.0, 2.0, 4.0])
     c_tw2, tw2_cost = solve_triple_overlap_fpt(w_triple, grid=grid_tw2)
     assert c_tw2.shape == (4,) and abs(tw2_cost - 6.0) < 1e-5
-        print("\n=== 4. Тест модулей 13–23: Решётки 3HCP / D₄ / E₈ / Λ₃₂, W₃₂, LUT, Mixed-Lattice, RoPE, Golay G₂₄ ===")
+
+    print("\n=== 4. Тест модулей 13–23: Решётки 3HCP / D₄ / E₈ / Λ₃₂, W₃₂, LUT, Mixed-Lattice, RoPE, Golay G₂₄ ===")
     v4 = torch.randn(16, 4)
     assert torch.allclose(fwht_4(fwht_4(v4)), v4, atol=1e-5)
     v8 = torch.randn(16, 8)
@@ -205,3 +207,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
