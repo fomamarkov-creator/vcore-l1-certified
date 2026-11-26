@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from safetensors.torch import load_file, save_file
 from .cuda_quantizer import VCoreTernaryQuantizer, _weighted_median_1d
+from .v5_engine import apply_cross_layer_compensation, pack_spherical_code
 
 
 def pack_ternary_to_uint8(ternary_mask: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, ...]]:
@@ -120,9 +121,7 @@ def quantize_ternary_exact_critical(
             out_scales.narrow(0, start, c_len).copy_(best_scales.reshape(-1))
 
         return out_q, out_mask, out_scales
-
-
-@torch.no_grad()
+    @torch.no_grad()
 def quantize_ternary_triangular_feedback(
     w_2d: torch.Tensor,
     R_upper: torch.Tensor,
@@ -194,6 +193,7 @@ def _quantize_int4_blockwise(w_f32: torch.Tensor, group_size: int = 32) -> Tuple
         w_hat = (q_int * step).reshape(-1).narrow(0, 0, orig_numel).reshape(w_f32.shape)
         err = torch.sum(torch.abs(w_f32 - w_hat)).item()
         return q_int.reshape(-1).narrow(0, 0, orig_numel).reshape(w_f32.shape), step.reshape(-1), err
+
 
 def _quantize_tensor_cascade(
     w_f32: torch.Tensor,
@@ -307,6 +307,22 @@ def _estimate_threshold_for_vram(
             cur_bytes -= (fp_b - q2_b)
             chosen_thresh = max(chosen_thresh, rel_err + 1e-4)
         return min(chosen_thresh, 0.95)
+    def _restore_quantized_tensor(
+    grid: torch.Tensor,
+    scales: torch.Tensor,
+    chosen_g: int,
+    orig_shape: Tuple[int, ...],
+    perm: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Восстанавливает квантованный тензор в исходный порядок каналов для расчёта E = W - Ŵ."""
+    total_elems = 1
+    for d in orig_shape:
+        total_elems *= d
+    w_hat = (grid.reshape(-1, chosen_g) * scales.unsqueeze(1)).reshape(-1)[:total_elems].reshape(orig_shape)
+    if perm is not None and w_hat.ndim == 2:
+        inv_perm = torch.argsort(perm)
+        w_hat = w_hat.index_select(1, inv_perm)
+    return w_hat
 
 
 def repack_safetensors_layerwise(
@@ -322,6 +338,8 @@ def repack_safetensors_layerwise(
     channel_perm: bool = True,
     activation_map: Optional[Dict[str, torch.Tensor]] = None,
     chol_map: Optional[Dict[str, torch.Tensor]] = None,
+    cross_layer_comp: bool = True,
+    spherical_emb: bool = False,
 ) -> Dict[str, float]:
     with torch.no_grad():
         state_dict = load_file(input_path)
@@ -337,28 +355,71 @@ def repack_safetensors_layerwise(
             if cascade else [group_size]
         )
 
+        prev_layer_pairs: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
         q2_layers = 0
         q4_layers = 0
+        spherical_layers = 0
+        compensated_layers = 0
         rolled_back_layers = 0
         total_l1_orig = 0.0
         total_l1_err = 0.0
-        total_tensors = len(state_dict)
 
-        for idx, (name, tensor) in enumerate(state_dict.items(), 1):
+        def _layer_sort_key(k: str) -> Tuple[int, str]:
+            if ".v_proj." in k or ".up_proj." in k or ".gate_proj." in k:
+                return (0, k)
+            if ".o_proj." in k or ".down_proj." in k:
+                return (1, k)
+            return (2, k)
+
+        ordered_items = sorted(state_dict.items(), key=lambda kv: _layer_sort_key(kv))
+        total_tensors = len(ordered_items)
+
+        for idx, (name, tensor) in enumerate(ordered_items, 1):
             print(f"\r[V-CORE {work_device.type.upper()}] [{idx}/{total_tensors}] {name[:48]:<48}", end="", flush=True)
             if not tensor.is_floating_point() or tensor.numel() == 0:
                 out_tensors[name] = tensor.cpu()
                 continue
+
             if "embed_tokens" in name or "lm_head" in name:
-                out_tensors[name] = tensor.cpu()
-                rolled_back_layers += 1
+                if spherical_emb and tensor.ndim == 2 and tensor.numel() >= 64:
+                    w_f32 = tensor.to(device=work_device, dtype=torch.float32)
+                    sp_idx, sp_rad, orig_shape, _ = pack_spherical_code(
+                        w_f32, lattice="e8", hyperbolic_poincare=True
+                    )
+                    out_tensors[f"{name}.vcore_sph_idx"] = sp_idx.cpu()
+                    out_tensors[f"{name}.vcore_sph_rad"] = sp_rad.cpu()
+                    out_tensors[f"{name}.vcore_shape"] = torch.tensor(orig_shape, dtype=torch.int64)
+                    spherical_layers += 1
+                    del w_f32
+                else:
+                    out_tensors[name] = tensor.cpu()
+                    rolled_back_layers += 1
                 continue
+
             if not include_aux_layers and tensor.ndim < 2:
                 out_tensors[name] = tensor.cpu()
                 continue
 
-            w_f32 = tensor.to(device=work_device, dtype=torch.float32)
-            total_l1_orig += torch.sum(torch.abs(w_f32)).item()
+            w_orig_f32 = tensor.to(device=work_device, dtype=torch.float32)
+            total_l1_orig += torch.sum(torch.abs(w_orig_f32)).item()
+
+            w_f32 = w_orig_f32
+            if cross_layer_comp and w_f32.ndim == 2:
+                pred_key = None
+                if name.endswith(".self_attn.o_proj.weight"):
+                    pred_key = name.replace(".self_attn.o_proj.weight", ".self_attn.v_proj.weight")
+                elif name.endswith(".mlp.down_proj.weight"):
+                    pred_key = name.replace(".mlp.down_proj.weight", ".mlp.up_proj.weight")
+
+                if pred_key is not None and pred_key in prev_layer_pairs:
+                    w1_o, w1_q = prev_layer_pairs.pop(pred_key)
+                    if w1_o.size(0) == w_f32.size(1):
+                        w_f32, ratio = apply_cross_layer_compensation(
+                            w1_o.to(work_device), w1_q.to(work_device), w_f32, dampening=0.5
+                        )
+                        if ratio < 1.0:
+                            compensated_layers += 1
+                    del w1_o, w1_q
 
             act_raw = activation_map.get(name, None) if activation_map is not None else None
             act_s = act_raw.to(device=work_device, dtype=torch.float32) if act_raw is not None else None
@@ -405,16 +466,23 @@ def repack_safetensors_layerwise(
                 if perm is not None:
                     out_tensors[f"{name}.vcore_perm"] = perm.to(torch.int64).cpu()
                 total_l1_err += layer_err
+
+                if cross_layer_comp and (
+                    name.endswith(".self_attn.v_proj.weight") or name.endswith(".mlp.up_proj.weight")
+                ):
+                    w_q_restored = _restore_quantized_tensor(grid, scales, chosen_g, orig_shape, perm)
+                    prev_layer_pairs[name] = (w_orig_f32.cpu(), w_q_restored.cpu())
             else:
                 out_tensors[name] = tensor.cpu()
                 rolled_back_layers += 1
 
-            del w_f32, w_work
+            del w_orig_f32, w_f32, w_work
             if act_s is not None:
                 del act_s
             if chol_r is not None:
                 del chol_r
 
+        prev_layer_pairs.clear()
         print(flush=True)
         del state_dict
         gc.collect()
@@ -430,6 +498,8 @@ def repack_safetensors_layerwise(
         return {
             "quantized_158bit_layers": q2_layers,
             "quantized_int4_layers": q4_layers,
+            "spherical_e8_layers": spherical_layers,
+            "cross_layer_compensated": compensated_layers,
             "rolled_back_fp16_layers": rolled_back_layers,
             "effective_max_rel_error": max_rel_error,
             "orig_size_mb": orig_mb,
@@ -452,6 +522,8 @@ def repack_sharded_model(
     target_vram_gb: Optional[float] = None,
     activation_map: Optional[Dict[str, torch.Tensor]] = None,
     chol_map: Optional[Dict[str, torch.Tensor]] = None,
+    cross_layer_comp: bool = True,
+    spherical_emb: bool = False,
 ) -> Dict[str, float]:
     os.makedirs(output_dir, exist_ok=True)
     shard_files = sorted(glob.glob(os.path.join(input_dir, "*.safetensors")))
@@ -463,10 +535,12 @@ def repack_sharded_model(
         "shards_processed": len(shard_files),
         "quantized_158bit_layers": 0,
         "quantized_int4_layers": 0,
+        "spherical_e8_layers": 0,
+        "cross_layer_compensated": 0,
         "rolled_back_fp16_layers": 0,
         "orig_size_mb": 0.0,
         "packed_size_mb": 0.0,
-        "total_l1_orig": 0.0,
+            "total_l1_orig": 0.0,
         "total_l1_err": 0.0,
     }
     new_weight_map: Dict[str, str] = {}
@@ -486,10 +560,14 @@ def repack_sharded_model(
             target_vram_gb=per_shard_vram,
             activation_map=activation_map,
             chol_map=chol_map,
+            cross_layer_comp=cross_layer_comp,
+            spherical_emb=spherical_emb,
         )
         for k in (
             "quantized_158bit_layers",
             "quantized_int4_layers",
+            "spherical_e8_layers",
+            "cross_layer_compensated",
             "rolled_back_fp16_layers",
             "orig_size_mb",
             "packed_size_mb",
@@ -508,7 +586,7 @@ def repack_sharded_model(
             with open(src_item, "r", encoding="utf-8") as f:
                 idx_data = json.load(f)
             idx_data["weight_map"] = new_weight_map
-            idx_data.setdefault("metadata", {})["vcore_quantized"] = "1.58bit-int4-cascade"
+            idx_data.setdefault("metadata", {})["vcore_quantized"] = "v5-crosslayer-spherical"
             with open(dst_item, "w", encoding="utf-8") as f:
                 json.dump(idx_data, f, indent=2)
         elif not item.endswith(".safetensors") and os.path.isfile(src_item):
@@ -516,6 +594,8 @@ def repack_sharded_model(
 
     agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
     return agg
+
+
 def repack_hf_hub_model(
     repo_id: str,
     output_dir: str,
@@ -526,6 +606,8 @@ def repack_hf_hub_model(
     target_vram_gb: Optional[float] = None,
     activation_map: Optional[Dict[str, torch.Tensor]] = None,
     chol_map: Optional[Dict[str, torch.Tensor]] = None,
+    cross_layer_comp: bool = True,
+    spherical_emb: bool = False,
 ) -> Dict[str, float]:
     from huggingface_hub import HfApi, hf_hub_download
 
@@ -541,6 +623,8 @@ def repack_hf_hub_model(
         "shards_processed": len(shard_names),
         "quantized_158bit_layers": 0,
         "quantized_int4_layers": 0,
+        "spherical_e8_layers": 0,
+        "cross_layer_compensated": 0,
         "rolled_back_fp16_layers": 0,
         "orig_size_mb": 0.0,
         "packed_size_mb": 0.0,
@@ -568,10 +652,14 @@ def repack_hf_hub_model(
                 target_vram_gb=per_shard_vram,
                 activation_map=activation_map,
                 chol_map=chol_map,
+                cross_layer_comp=cross_layer_comp,
+                spherical_emb=spherical_emb,
             )
             for k in (
                 "quantized_158bit_layers",
                 "quantized_int4_layers",
+                "spherical_e8_layers",
+                "cross_layer_compensated",
                 "rolled_back_fp16_layers",
                 "orig_size_mb",
                 "packed_size_mb",
@@ -591,10 +679,10 @@ def repack_hf_hub_model(
             with open(idx_src, "r", encoding="utf-8") as f:
                 idx_data = json.load(f)
             idx_data["weight_map"] = new_weight_map
-            idx_data.setdefault("metadata", {})["vcore_quantized"] = "1.58bit-int4-cascade"
+            idx_data.setdefault("metadata", {})["vcore_quantized"] = "v5-crosslayer-spherical"
             with open(os.path.join(output_dir, "model.safetensors.index.json"), "w", encoding="utf-8") as f:
                 json.dump(idx_data, f, indent=2)
 
     agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
     return agg
-    
+        
