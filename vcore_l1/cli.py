@@ -52,7 +52,19 @@ def main():
         )
 
     cross_layer = not args.no_cross_layer
-
+    
+    if args.vlm:
+        if not args.input or not os.path.isdir(args.input):
+            raise ValueError("Для --vlm укажите локальную папку модели в --input")
+        stats = repack_vlm_model(
+            input_dir=args.input,
+            output_dir=args.output,
+            group_size=args.group_size,
+            max_rel_error=args.max_rel_error,
+            spherical_emb=True,
+        )
+    elif args.hf_repo:
+        
     if args.hf_repo:
         stats = repack_hf_hub_model(
             repo_id=args.hf_repo,
@@ -111,6 +123,19 @@ def main():
         for k, v in g_stats.items():
             print(f"  {k:<14}: {v}")
 
+    if args.bundle:
+        if not os.path.isdir(args.output):
+            raise ValueError("Для --bundle укажите выходную папку модели в --output")
+        b_stats = export_vcore_bundle(
+            model_dir=args.output,
+            bundle_path=args.bundle,
+            max_rel_error=args.max_rel_error,
+            spherical_emb=args.spherical_emb,
+        )
+        print("=== V-CORE SINGLE-FILE BUNDLE (.vcore) ===")
+        for k, v in b_stats.items():
+            print(f"  {k:<26}: {v}")
+            
 
 if __name__ == "__main__":
     main()
