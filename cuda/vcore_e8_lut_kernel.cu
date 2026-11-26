@@ -9,11 +9,10 @@
 #include <stdint.h>
 #include <vector>
 
-// Построение таблицы 241 точки решётки E8 (1 нулевой + 112 корневых + 128 полуцелых)
 static std::vector<float> build_e8_cb_host() {
     std::vector<float> cb(241 * 8, 0.0f);
     int idx = 1;
-    const float signs = {-1.0f, 1.0f};
+    std::vector<float> signs = {-1.0f, 1.0f};
     for (int i = 0; i < 8; ++i) {
         for (int j = i + 1; j < 8; ++j) {
             for (float s1 : signs) {
@@ -49,7 +48,6 @@ static void ensure_e8_constant_cb() {
     }
 }
 
-// Этап 1: Построение LUT откликов (num_e8_blocks x 241) для каждого токена батча
 __global__ void vcore_build_e8_lut_kernel(
     const float* __restrict__ X,
     float* __restrict__ LUT,
@@ -58,7 +56,7 @@ __global__ void vcore_build_e8_lut_kernel(
 ) {
     int tok = blockIdx.y;
     int eb = blockIdx.x;
-    int code = threadIdx.x; // 0..240
+    int code = threadIdx.x;
     int num_e8_blocks = in_features / 8;
 
     if (tok >= batch_tokens || eb >= num_e8_blocks || code >= 241) return;
@@ -78,7 +76,6 @@ __global__ void vcore_build_e8_lut_kernel(
     LUT[(tok * num_e8_blocks + eb) * 241 + code] = dot;
 }
 
-// Этап 2: Чистый табличный GEMM без умножений весов (O(1) выборка из LUT)
 __global__ void vcore_e8_lut_gemm_kernel(
     const uint8_t* __restrict__ E8_indices,
     const float* __restrict__ block_scales,
