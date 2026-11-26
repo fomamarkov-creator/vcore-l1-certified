@@ -42,7 +42,13 @@ from vcore_l1 import (
     integer_only_softmax,
     integer_only_rmsnorm,
     integer_only_cayley_rope,
+    probe_hardware,
+    get_dispatcher,
+    export_vcore_bundle,
+    unpack_vcore_bundle_to_temp,
+    repack_vlm_model,
 )
+
 
 
 def absmean_bitnet_quantize(weights: torch.Tensor) -> torch.Tensor:
@@ -241,6 +247,32 @@ def main():
     q_rope, k_rope = integer_only_cayley_rope(torch.randn(1, 2, 4, 16), torch.randn(1, 2, 4, 16), torch.arange(4))
     assert q_rope.shape == (1, 2, 4, 16) and k_rope.shape == (1, 2, 4, 16)
 
+        hw = probe_hardware()
+    disp = get_dispatcher()
+    assert hw.cpu_cores >= 1 and disp.active_backend_name() != ""
+
+    with tempfile.TemporaryDirectory() as vlm_tmp:
+        vlm_in = os.path.join(vlm_tmp, "vlm_in")
+        vlm_out = os.path.join(vlm_tmp, "vlm_out")
+        os.makedirs(vlm_in, exist_ok=True)
+        save_file(
+            {
+                "visual.blocks.0.attn.qkv.weight": torch.randn(64, 64, dtype=torch.float16),
+                "model.layers.0.mlp.up_proj.weight": torch.randn(128, 64, dtype=torch.float16),
+                "model.layers.0.mlp.down_proj.weight": torch.randn(64, 128, dtype=torch.float16),
+            },
+            os.path.join(vlm_in, "model.safetensors"),
+        )
+        vlm_st = repack_vlm_model(vlm_in, vlm_out, group_size=64, max_rel_error=0.45)
+        assert vlm_st["vision_spherical_e8_layers"] == 1
+
+        bundle_file = os.path.join(vlm_tmp, "test_model.vcore")
+        b_info = export_vcore_bundle(vlm_out, bundle_file, max_rel_error=0.35, spherical_emb=True)
+        assert os.path.isfile(bundle_file) and b_info["certified_max_block_drift"] > 0.0
+        unpacked_dir, cert_back = unpack_vcore_bundle_to_temp(bundle_file)
+        assert os.path.isfile(os.path.join(unpacked_dir.name, "model.safetensors"))
+        assert cert_back["freivalds_verified"] is True
+        
     print(
         f"[OK] Все компоненты v5.1.0 (Lean 4 24-Module Core, Cross-Layer Compensation, Spherical Embeddings/KV, "
         f"Integer-Only Q14/Q20, E8/Λ32 [{mix_sum['avg_bpw']:.2f} b/w], ℓ₁-LoRA [{err_before:.1f} -> {err_after:.1f}]) работают!"
