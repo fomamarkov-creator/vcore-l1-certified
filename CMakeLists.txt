@@ -25,12 +25,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
         target_link_libraries(vcore-run PRIVATE OpenMP::OpenMP_CXX)
     endif()
 else()
-    # На ARM64 (Apple Silicon / Android Termux) собираем vcore-run без x86 флагов
     add_executable(vcore-run cpp/vcore_run.cpp cpp/vcore_cpu_engine.cpp)
     target_compile_options(vcore-run PRIVATE -O3)
 endif()
 
-# 3. Опциональный CUDA движок (если найден nvcc)
+# 3. Опциональный CUDA движок (1.58-bit Fused + Sub-1-Bit E8 LUT в Shared Memory)
 include(CheckLanguage)
 check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
@@ -39,6 +38,7 @@ if(CMAKE_CUDA_COMPILER)
     add_library(vcore_engine SHARED
         cuda/VCoreEngine.cpp
         cuda/vcore_quantize_kernel.cu
+        cuda/vcore_e8_lut_kernel.cu
     )
     set_target_properties(vcore_engine PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
