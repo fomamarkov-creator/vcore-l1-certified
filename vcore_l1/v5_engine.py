@@ -115,7 +115,7 @@ def unpack_spherical_code(
         if dim == 8
         else get_d4_codebook(indices.device, torch.float32)[1:]
     )
-    restored = cb[indices.long()] * radii.to(torch.float32).unsqueeze(1)
+    restored = cb[indices.long()] * radii.to(torch.float32).unsqueeze(-1)
     return restored.reshape(-1)[:total_elems].reshape(orig_shape).to(dtype)
 
 
