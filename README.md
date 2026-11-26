@@ -9,7 +9,7 @@
 # V-CORE (ℓ₁)-Certified v4.0: Sub-1-Bit Lattice (Λ₃₂ / Λ₂₄ / E₈ / D₄), LUT Kernels & Verified GPU/CPU Quantization Engine
 
 
-A complete symbolic-numeric compression and inference runtime combining a **machine-checked 25-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v7.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
+A complete symbolic-numeric compression and inference runtime combining a **machine-checked 26-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v7.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
 
 
 
@@ -63,7 +63,10 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 * 
    * **Zero-Copy `.vcore` Bundle `mmap` Loader (`vcore_bundle_mmap.hpp`):** Opens 64-byte aligned single-file `.vcore` bundles directly in C++ address space with zero disk extraction and prints the embedded Lean 4 drift certificate on startup.
    * 
-
+9. **Symbolic Dyadic `VNode` Outlier Decomposition & Paired Cold-Cache A/B Benchmark:**
+   * **Unbounded Dyadic `VNode` Reduction (`decompose_to_dyadic_vnodes`, `VCORE-LOGIC-MARKOV-EFIM-2026`):** Decomposes extreme outlier channels into symbolic `(base, exp, offset)` dyadic nodes with Lean 4 verified 2-step mass contraction (`MarkovL1DyadicVNodeReduction.lean`, Module 26) and embeds the cryptographic-mathematical stamp into every `.vcore` bundle.
+   * **Paired Alternating A/B Benchmark (`vcore-bench`):** Evaluates `FP32` vs. `BitNet (absmean)` vs. `V-CORE 1.58-bit` vs. `V-CORE Sub-1-Bit E8 LUT` using alternating execution order (`A->B` / `B->A`) and explicit cache clearing to eliminate warm-cache bias.
+   * 
 ---
 ![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
 
@@ -251,8 +254,12 @@ vcore-serve --model ./qwen2.5-1.5b.vcore --port 8000
 vcore-pack --input ./Qwen2.5-VL-3B --output ./qwen_vl_vcore --vlm --bundle ./qwen_vl.vcore
 
 # Train from scratch or fine-tune with QAT-LoRA directly over 1.58-bit / E8 lattices
+
 vcore-train --model Qwen/Qwen2.5-1.5B --data ./train.jsonl --output ./qwen_qat --mode e8 --epochs 2
 ```
+# Run paired cold-cache A/B benchmark (FP32 vs BitNet vs V-CORE 1.58-bit vs Sub-1-Bit E8 LUT)
+
+vcore-bench --hidden-size 4096 --out-size 4096 --steps 30 --ab-compare
 
 ## Citation
 
@@ -271,3 +278,5 @@ If you use **V-CORE (ℓ₁)-Certified** or the **Lean 4 ℓ₁-Projection Compl
 # Zero-Copy mmap execution of a single-file .vcore bundle directly in native C++17 / AVX2 (with Lean 4 Passport check)
 
 ./build/vcore-run --model ./qwen2.5-1.5b.vcore --prompt "Explain L1 median quantization." --tokens 64 --integer-only
+
+
