@@ -3,8 +3,6 @@
 
 import argparse
 import os
-from .vcore_bundle import export_vcore_bundle
-from .vlm_support import repack_vlm_model
 from .calibration import collect_activation_importance
 from .gguf_exporter import export_vcore_to_gguf
 from .safetensors_quantizer import (
@@ -12,6 +10,8 @@ from .safetensors_quantizer import (
     repack_sharded_model,
     repack_hf_hub_model,
 )
+from .vcore_bundle import export_vcore_bundle
+from .vlm_support import repack_vlm_model
 
 
 def main():
@@ -31,11 +31,11 @@ def main():
     parser.add_argument("--triangular-feedback", action="store_true", help="Включить треугольную компенсацию корреляций Холецкого при калибровке")
     parser.add_argument("--no-cross-layer", action="store_true", help="Отключить межслойную компенсацию кривизны (v_proj->o_proj, up_proj->down_proj)")
     parser.add_argument("--spherical-emb", action="store_true", help="Сжать embed_tokens и lm_head гиперболическими сферическими кодами E₈ (~1.0 b/w)")
-    parser.add_argument("--export-gguf", default=None, help="Сразу экспортировать сжатую модель в .gguf (для llama.cpp / Ollama)")
-    parser.add_argument("--token", default=None, help="Токен Hugging Face")
     parser.add_argument("--vlm", action="store_true", help="Режим мультимодальной модели (Qwen-VL / LLaVA: visual в E₈ + LLM каскад)")
     parser.add_argument("--bundle", default=None, help="Упаковать результат в единый файл .vcore с паспортом Lean 4")
-    
+    parser.add_argument("--export-gguf", default=None, help="Сразу экспортировать сжатую модель в .gguf (для llama.cpp / Ollama)")
+    parser.add_argument("--token", default=None, help="Токен Hugging Face")
+
     args = parser.parse_args()
 
     act_map = None
@@ -52,7 +52,7 @@ def main():
         )
 
     cross_layer = not args.no_cross_layer
-    
+
     if args.vlm:
         if not args.input or not os.path.isdir(args.input):
             raise ValueError("Для --vlm укажите локальную папку модели в --input")
@@ -64,8 +64,6 @@ def main():
             spherical_emb=True,
         )
     elif args.hf_repo:
-        
-    if args.hf_repo:
         stats = repack_hf_hub_model(
             repo_id=args.hf_repo,
             output_dir=args.output,
@@ -135,7 +133,7 @@ def main():
         print("=== V-CORE SINGLE-FILE BUNDLE (.vcore) ===")
         for k, v in b_stats.items():
             print(f"  {k:<26}: {v}")
-            
+
 
 if __name__ == "__main__":
     main()
