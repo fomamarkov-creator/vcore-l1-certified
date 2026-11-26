@@ -121,7 +121,9 @@ def quantize_ternary_exact_critical(
             out_scales.narrow(0, start, c_len).copy_(best_scales.reshape(-1))
 
         return out_q, out_mask, out_scales
-    @torch.no_grad()
+
+
+@torch.no_grad()
 def quantize_ternary_triangular_feedback(
     w_2d: torch.Tensor,
     R_upper: torch.Tensor,
