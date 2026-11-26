@@ -1,7 +1,7 @@
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 [![DOI](https://zenodo.org)](https://doi.org/10.5281/zenodo.24527692)
 
-* **Lean Core:** `l1-projection-complexity-lean4` (`v6.0.0` — **23 Verified Modules**, `0 sorry`s)
+* **Lean Core:** `l1-projection-complexity-lean4` (`v7.0.0` — **24 Verified Modules**, `0 sorry`s)
 * **Toolchain:** Lean `v4.37.0-rc1` 
 * **Backend:** PyTorch / Warp-CUDA (`sm_70`–`sm_90`) / Native AVX2 C++17
 * **License:** AGPL-3.0
@@ -9,7 +9,7 @@
 # V-CORE (ℓ₁)-Certified v4.0: Sub-1-Bit Lattice (Λ₃₂ / Λ₂₄ / E₈ / D₄), LUT Kernels & Verified GPU/CPU Quantization Engine
 
 
-A complete symbolic-numeric compression and inference runtime combining a **machine-checked 23-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v6.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
+A complete symbolic-numeric compression and inference runtime combining a **machine-checked 23-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v7.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
 
 
 
@@ -46,9 +46,13 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
    * **32D Cascade Rotations (`fwht_16`, `fwht_32`) & Barnes–Wall `Λ₃₂` (`quantize_barnes_wall32_lattice`, ~0.625 b/w):** Disperses heavy-tailed outliers across 32-element blocks without floating-point multiplications.
    * **Direct Lattice LUT Linear (`VCoreLUTLinear`):** Computes $E_8$ lattice matrix-vector products via precomputed activation lookup tables (`241` states) without unpacking weights to `FP16`.
    * **Mixed-Lattice Allocator & E2E Block Certifier (`allocate_mixed_lattice`, `certify_transformer_block_e2e`):** Automatically distributes bitrates (`Λ₂₄ 0.733b`, `E₈ 0.989b`, `D₄ 1.161b`) under a strict target budget (`~0.80 bpw`) and emits a single input-to-output Transformer block drift bound.
-   * **Rational RoPE Drift & $O(1)$ Golay `G₂₄` Syndrome Decoder (`verify_rope_key_drift`, `golay24_syndrome_decode`):** Verifies quantized-key RoPE attention drift and decodes 24-bit Golay codewords in $O(1)$ table lookups.
-   
-   * 
+   * **Rational RoPE Drift & $O(1)$ Golay `G₂₄` Syndrome Decoder (`verify_rope_key_drift`, `golay24_syndrome_decode`):** Verifies quantized-key RoPE attention drift and decodes 24-bit Golay codewords in $O(1)$ table lookups.*
+  -
+7. **V-CORE v5.0 Frontier Primitives (`vcore_l1/v5_engine.py`):**
+   - **Cross-Layer $\ell_1$ Curvature Compensation (`apply_cross_layer_compensation`):** Adjusts next-layer weights $W_2' = W_2 + \Delta W_2$ to cancel first-order quantization residuals from layer $l$ (`cross_layer_exact_cancellation`).
+   - **Rational Spherical Codes (`quantize_spherical_code`):** Projects embedding and KV-cache blocks onto constant-energy hyperspheres ($\|c\|_2^2 = R^2$ on $D_4$/$E_8$ shells) with certified cosine lower bounds.
+   - **Integer-Only / Float-Free Transformer Primitives (`dyadic_softmax`, `integer_rmsnorm`):** Evaluates Softmax via dyadic shift-and-square approximation $(1 + x / 2^k)^{2^k}$ and RMSNorm via quadratically convergent Newton steps (`invSqrtNewtonStepQ_residual_identity`).
+   - 
 ---
 ![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
 
@@ -81,7 +85,7 @@ Evaluated on real projection weights (`Qwen2.5-0.5B-Instruct`, `layers.0.mlp.gat
 | Model | Original Size | V-CORE Size | GGUF Size | Compression | Rel. ℓ₁ Error | Pre-built Hugging Face GGUF |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
 
-| **Qwen/Qwen2.5-0.5B-Instruct** | 942.3 MB | 453.7 MB | 717.8 MB | **2.08×** | 10.76% | `MarkovEfim/Qwen2.5-0.5B-Instruct-V-CORE-L1-GGUF` |
+| **Qwen/Qwen2.5-0.5B-Instruct** | 942.3 MB | 453.7 MB | 717.8 MB | **2.08×** | 10.76% | [MarkovEfim/Qwen2.5-0.5B-Instruct-V-CORE-L1-GGUF]
 (https://huggingface.co/MarkovEfim/Qwen2.5-0.5B-Instruct-V-CORE-L1-GGUF) |
 | **Qwen/Qwen2.5-1.5B-Instruct** | 2,944.4 MB | 1,152.3 MB | 1,599.9 MB | **2.56×** | 10.63% | [MarkovEfim/Qwen2.5-1.5B-Instruct-V-CORE-L1-GGUF](https://huggingface.co/MarkovEfim/Qwen2.5-1.5B-Instruct-V-CORE-L1-GGUF) |
 | **Qwen/Qwen2.5-7B-Instruct** | 14,525.7 MB | 5,588.9 MB | 5,587.0 MB | **2.60×** | 10.66% | [MarkovEfim/Qwen2.5-7B-Instruct-V-CORE-L1-GGUF](https://huggingface.co/MarkovEfim/Qwen2.5-7B-Instruct-V-CORE-L1-GGUF) |
