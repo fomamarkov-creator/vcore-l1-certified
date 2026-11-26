@@ -5,6 +5,7 @@ import argparse
 import os
 from .calibration import collect_activation_importance
 from .gguf_exporter import export_vcore_to_gguf
+from .hub_publisher import generate_model_card_readme, publish_vcore_to_hub
 from .safetensors_quantizer import (
     repack_safetensors_layerwise,
     repack_sharded_model,
@@ -34,6 +35,7 @@ def main():
     parser.add_argument("--vlm", action="store_true", help="Режим мультимодальной модели (Qwen-VL / LLaVA: visual в E₈ + LLM каскад)")
     parser.add_argument("--bundle", default=None, help="Упаковать результат в единый файл .vcore с паспортом Lean 4")
     parser.add_argument("--export-gguf", default=None, help="Сразу экспортировать сжатую модель в .gguf (для llama.cpp / Ollama)")
+    parser.add_argument("--push-to-hub", default=None, help="Опционально загрузить готовую модель на Hugging Face (user/model-vcore)")
     parser.add_argument("--token", default=None, help="Токен Hugging Face")
 
     args = parser.parse_args()
@@ -52,6 +54,7 @@ def main():
         )
 
     cross_layer = not args.no_cross_layer
+    base_name = args.hf_repo if args.hf_repo else os.path.basename(os.path.abspath(args.input))
 
     if args.vlm:
         if not args.input or not os.path.isdir(args.input):
@@ -111,6 +114,16 @@ def main():
         else:
             print(f"  {k:<24}: {v}")
 
+    if os.path.isdir(args.output):
+        card_path = generate_model_card_readme(
+            output_dir=args.output,
+            base_model=base_name,
+            stats=stats,
+            max_rel_error=args.max_rel_error,
+            spherical_emb=args.spherical_emb,
+        )
+        print(f"  model_card_readme       : {card_path}")
+
     if args.export_gguf:
         if not os.path.isdir(args.output):
             raise ValueError("Для экспорта в GGUF укажите выходную директорию модели в --output")
@@ -134,7 +147,13 @@ def main():
         for k, v in b_stats.items():
             print(f"  {k:<26}: {v}")
 
+    if args.push_to_hub:
+        if not os.path.isdir(args.output):
+            raise ValueError("Для --push-to-hub укажите выходную папку модели в --output")
+        hub_url = publish_vcore_to_hub(args.output, repo_id=args.push_to_hub, token=args.token)
+        print(f"=== HUGGING FACE HUB PUBLISHED: {hub_url} ===")
+
 
 if __name__ == "__main__":
     main()
-            
+    
