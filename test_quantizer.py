@@ -48,6 +48,7 @@ from vcore_l1 import (
     export_vcore_bundle,
     unpack_vcore_bundle_to_temp,
     repack_vlm_model,
+    decompose_to_dyadic_vnodes
 )
 
 
@@ -269,7 +270,10 @@ def main():
         unpacked_dir, cert_back = unpack_vcore_bundle_to_temp(bundle_file)
         assert os.path.isfile(os.path.join(unpacked_dir.name, "model.safetensors"))
         assert cert_back["freivalds_verified"] is True
-
+        
+        vnode_blk, vnode_err = decompose_to_dyadic_vnodes(torch.tensor([16.0, -32.5, 0.0, 128.25]))
+        assert vnode_blk.certified_contraction is True and vnode_err < 1e-3
+    
     print(
         f"[OK] Все компоненты v5.0 (Lean 4 24-Module Core, Cross-Layer, Spherical E8, Integer-Only Q14/Q20, "
         f"Hardware Probe [{hw.simd_backend}], .vcore Bundle, VLM, ℓ₁-LoRA [{err_before:.1f} -> {err_after:.1f}]) работают!"
