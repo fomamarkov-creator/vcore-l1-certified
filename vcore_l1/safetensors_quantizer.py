@@ -309,7 +309,7 @@ def _estimate_threshold_for_vram(
             cur_bytes -= (fp_b - q2_b)
             chosen_thresh = max(chosen_thresh, rel_err + 1e-4)
         return min(chosen_thresh, 0.95)
-    def _restore_quantized_tensor(
+def _restore_quantized_tensor(
     grid: torch.Tensor,
     scales: torch.Tensor,
     chosen_g: int,
