@@ -29,6 +29,7 @@ vcore-ui = "vcore_l1.tui:main"
 vcore-web = "vcore_l1.web_ui:main"
 vcore-serve = "vcore_l1.openai_api:main"
 vcore-train = "vcore_l1.train_cli:main"
+vcore-pull = "vcore_l1.one_click:main"
 
 [tool.setuptools.packages.find]
 include = ["vcore_l1*"]
