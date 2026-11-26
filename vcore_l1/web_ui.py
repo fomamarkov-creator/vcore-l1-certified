@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
 import torch
+from .backend_dispatcher import get_dispatcher
 from .inference_layer import (
     VCoreDynamicCache,
     VCoreModelForCausalLM,
@@ -350,6 +351,7 @@ class VCoreWebState:
 
 
 def run_web_server(host: str = "0.0.0.0", port: int = 8080, initial_model: Optional[str] = None):
+    get_dispatcher().profile.summary_banner()
     state = VCoreWebState(initial_model=initial_model)
 
     class Handler(BaseHTTPRequestHandler):
@@ -365,7 +367,7 @@ def run_web_server(host: str = "0.0.0.0", port: int = 8080, initial_model: Optio
             self.wfile.write(raw)
 
         def do_GET(self):
-            if self.path == "/api/status":
+            if self.path == ""hardware": get_dispatcher().profile.to_dict()":
                 self._send_json({
                     "backend": state.backend,
                     "model": state.model_name,
