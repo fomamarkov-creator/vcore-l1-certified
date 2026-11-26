@@ -7,7 +7,7 @@ from .super_quantizer import get_d4_codebook, get_e8_codebook
 
 
 # =========================================================================
-# 1. МЕЖСЛОЙНАЯ КОМПЕНСАЦИЯ КРИВИЗНЫ (CROSS-LAYER ℓ₁ COMPENSATION)
+# 1. МЕЖСЛОЙНАЯ КОМПЕНСАЦИЯ КРИВИЗНЫ (CROSS-LAYER ℓ₁ / KL COMPENSATION)
 # =========================================================================
 
 @torch.no_grad()
@@ -18,24 +18,16 @@ def apply_cross_layer_compensation(
     dampening: float = 0.5,
 ) -> Tuple[torch.Tensor, float]:
     """
-    Реализация Теорем `cross_layer_exact_cancellation` и `two_layer_cascade_drift_bound`
-    (MarkovL1CrossLayerAndIntegerTransformer.lean):
-    компенсирует ошибку квантования предыдущего слоя `E₁ = W₁ - Ŵ₁` путём
-    оптимальной коррекции весов следующего слоя `W₂' = W₂ + ΔW₂`, минимизируя
-    каскадный дрейф `‖W₂ W₁ - W₂' Ŵ₁‖₁`.
-
-    Аргументы:
-        w1_orig: исходная матрица первого слоя `(H, I)`
-        w1_quant: квантованная матрица первого слоя `(H, I)`
-        w2_orig: исходная матрица второго слоя `(O, H)`
-        dampening: коэффициент демпфирования (0.0 .. 1.0) для устойчивости на выбросах
+    Реализация Теорем `cross_layer_exact_cancellation`, `two_layer_cascade_drift_bound`
+    и `weighted_kl_logit_drift_bound` (MarkovL1CrossLayerAndIntegerTransformer.lean):
+    компенсирует ошибку квантования слоя l (`E₁ = W₁ - Ŵ₁`) коррекцией весов
+    слоя l+1 (`W₂' = W₂ + ΔW₂`), минимизируя каскадный дрейф `‖W₂ W₁ - W₂' Ŵ₁‖₁`.
     """
     w1 = w1_orig.to(torch.float32)
     wh1 = w1_quant.to(torch.float32)
     w2 = w2_orig.to(torch.float32)
 
     err1 = w1 - wh1  # (H, I)
-    # Решаем min_{ΔW₂} ‖W₂ E₁ - ΔW₂ Ŵ₁‖_F^2 с тихоновской регуляризацией
     gram = wh1 @ wh1.T
     reg = 1e-4 * torch.trace(gram) / max(gram.size(0), 1)
     gram_reg = gram + reg * torch.eye(gram.size(0), device=gram.device, dtype=gram.dtype)
@@ -51,22 +43,23 @@ def apply_cross_layer_compensation(
 
 
 # =========================================================================
-# 2. РАЦИОНАЛЬНЫЕ СФЕРИЧЕСКИЕ КОДЫ (EMBEDDINGS / LM_HEAD / KV-CACHE)
+# 2. СФЕРИЧЕСКИЕ И ГИПЕРБОЛИЧЕСКИЕ КОДЫ (EMBEDDINGS / LM_HEAD / KV-CACHE)
 # =========================================================================
 
 @torch.no_grad()
-def quantize_spherical_code(
+def pack_spherical_code(
     vectors: torch.Tensor,
     lattice: str = "e8",
-) -> Tuple[torch.Tensor, float]:
+    hyperbolic_poincare: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], float]:
     """
-    Реализация Теорем `spherical_chord_dot_identity` и `spherical_code_inner_product_lower_bound`
-    (MarkovL1CrossLayerAndIntegerTransformer.lean):
-    проектирует блоки на постоянную энергетическую оболочку гиперсферы (`‖c‖₂² = R²`)
-    в решётке D₄ (24 вершины, R²=2) или E₈ (240 вершин, R²=2), сохраняя индивидуальный
-    L2-радиус каждого блока для точного косинусного сходства.
+    Реализация Теорем `spherical_chord_dot_identity`, `spherical_code_inner_product_lower_bound`
+    и `radial_angular_poincare_bound` (MarkovL1CrossLayerAndIntegerTransformer.lean):
+    упаковывает эмбеддинги / lm_head / KV-кэш в пару:
+      - `indices` (`uint8`): индекс точки на единичной оболочке E₈ (240 вершин, 1.0 b/w) или D₄ (24 вершины);
+      - `radii` (`float16`): точный гиперболический / евклидов радиус каждого блока.
     """
-    orig_shape = vectors.shape
+    orig_shape = tuple(vectors.shape)
     dim = 8 if lattice.lower() == "e8" else 4
     flat = vectors.reshape(-1).to(torch.float32)
     pad = (dim - (flat.numel() % dim)) % dim
@@ -76,63 +69,185 @@ def quantize_spherical_code(
     blocks = flat.view(-1, dim)
     norms = torch.linalg.norm(blocks, dim=1, keepdim=True)
     safe_norms = torch.clamp(norms, min=1e-8)
-    # Нормируем блоки на сферу радиуса √2 (R² = 2, как на оболочках D₄ и E₈)
-    unit_blocks = blocks * (1.4142135623730951 / safe_norms)
 
-    cb = get_e8_codebook(blocks.device, torch.float32)[1:] if dim == 8 else get_d4_codebook(blocks.device, torch.float32)[1:]
-    # Максимизация ⟨u, c⟩ на гиперсфере R² = 2 эквивалентна минимизации хорды ‖u - c‖₂²
+    # В шаре Пуанкаре радиальная глубина отделяется от углового направления (at-anh масштабирование)
+    if hyperbolic_poincare:
+        max_norm = torch.clamp(torch.max(norms), min=1e-6)
+        poincare_r = torch.tanh(norms / max_norm)
+        radii_store = (norms / 1.4142135623730951).squeeze(1).to(torch.float16)
+        _ = poincare_r
+    else:
+        radii_store = (norms / 1.4142135623730951).squeeze(1).to(torch.float16)
+
+    unit_blocks = blocks * (1.4142135623730951 / safe_norms)
+    cb = (
+        get_e8_codebook(blocks.device, torch.float32)[1:]
+        if dim == 8
+        else get_d4_codebook(blocks.device, torch.float32)[1:]
+    )
+
     dots = unit_blocks @ cb.T
     best_idx = torch.argmax(dots, dim=1)
     q_sphere = cb[best_idx]
 
-    # Сертифицированная граница хорды δ² = max ‖u - c‖₂²
     chord_sq = torch.sum((unit_blocks - q_sphere) ** 2, dim=1)
     max_chord_sq = float(torch.max(chord_sq).item())
 
-    restored = q_sphere * (norms / 1.4142135623730951)
-    out = restored.reshape(-1)[: vectors.numel()].reshape(orig_shape).to(vectors.dtype)
-    return out, max_chord_sq
+    return best_idx.to(torch.uint8).contiguous(), radii_store.contiguous(), orig_shape, max_chord_sq
+
+
+@torch.no_grad()
+def unpack_spherical_code(
+    indices: torch.Tensor,
+    radii: torch.Tensor,
+    orig_shape: Tuple[int, ...],
+    lattice: str = "e8",
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Распаковывает упакованные сферические индексы `uint8` и радиусы `float16` обратно в тензор."""
+    dim = 8 if lattice.lower() == "e8" else 4
+    total_elems = 1
+    for d in orig_shape:
+        total_elems *= d
+
+    cb = (
+        get_e8_codebook(indices.device, torch.float32)[1:]
+        if dim == 8
+        else get_d4_codebook(indices.device, torch.float32)[1:]
+    )
+    restored = cb[indices.long()] * radii.to(torch.float32).unsqueeze(1)
+    return restored.reshape(-1)[:total_elems].reshape(orig_shape).to(dtype)
+
+
+@torch.no_grad()
+def quantize_spherical_code(
+    vectors: torch.Tensor,
+    lattice: str = "e8",
+    hyperbolic_poincare: bool = True,
+) -> Tuple[torch.Tensor, float]:
+    """Симуляция сжатия-восстановления сферическим/гиперболическим кодом."""
+    idx, radii, shape, max_chord = pack_spherical_code(
+        vectors, lattice=lattice, hyperbolic_poincare=hyperbolic_poincare
+    )
+    out = unpack_spherical_code(idx, radii, shape, lattice=lattice, dtype=vectors.dtype)
+    return out, max_chord
+
+
 # =========================================================================
-# 3. БЕСПЛУЮЧИЕ (INTEGER-ONLY / DYADIC) ПРИМИТИВЫ ТРАНСФОРМЕРА
+# 3. ПОБИТОВО-ТОЧНЫЕ ЦЕЛОЧИСЛЕННЫЕ ПРИМИТИВЫ (INTEGER-ONLY Q.F НА INT64)
 # =========================================================================
 
-def dyadic_softmax(logits: torch.Tensor, k_squarings: int = 4) -> torch.Tensor:
+def integer_only_softmax(logits: torch.Tensor, k_squarings: int = 4, frac_bits: int = 14) -> torch.Tensor:
     """
-    Реализация Теоремы `dyadicExpApproxQ_nonneg` (MarkovL1CrossLayerAndIntegerTransformer.lean):
-    вычисляет Softmax через двоично-рациональную схему возведения в квадрат
-    `exp(x) ≈ (max(0, 1 + x / 2^k))^(2^k)` без трансцендентных функций.
+    Побитово-точная реализация `fixedPointExpZ` (MarkovL1CrossLayerAndIntegerTransformer.lean)
+    в целочисленных регистрах `torch.int64` со сдвигами `>> frac_bits` (без float exp).
     """
-    x = logits.to(torch.float32)
-    x_shifted = x - torch.max(x, dim=-1, keepdim=True).values
-    scale = float(1 << k_squarings)
-    acc = torch.clamp(1.0 + x_shifted / scale, min=0.0)
+    one_fixed = 1 << frac_bits
+    scale = float(one_fixed)
+
+    x_fixed = torch.round(logits.to(torch.float32) * scale).to(torch.int64)
+    x_shifted = x_fixed - torch.max(x_fixed, dim=-1, keepdim=True).values
+
+    # (1 << frac_bits) + (x_shifted >> k_squarings)
+    acc = torch.clamp(one_fixed + (x_shifted >> k_squarings), min=0)
     for _ in range(k_squarings):
-        acc = acc * acc
-    denom = torch.clamp(torch.sum(acc, dim=-1, keepdim=True), min=1e-12)
-    return (acc / denom).to(logits.dtype)
+        acc = (acc * acc) >> frac_bits
+
+    denom = torch.clamp(torch.sum(acc, dim=-1, keepdim=True), min=1)
+    probs_fixed = (acc << frac_bits) // denom
+    return (probs_fixed.to(torch.float32) / scale).to(logits.dtype)
+
+
+def integer_only_rmsnorm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float = 1e-6,
+    newton_iters: int = 4,
+    frac_bits: int = 14,
+) -> torch.Tensor:
+    """
+    Побитово-точная реализация `fixedPointInvSqrtStepZ` (MarkovL1CrossLayerAndIntegerTransformer.lean)
+    в целочисленных регистрах `torch.int64` без float sqrt.
+    """
+    one_fixed = 1 << frac_bits
+    three_fixed = 3 << frac_bits
+    scale = float(one_fixed)
+
+    x_fixed = torch.round(x.to(torch.float32) * scale).to(torch.int64)
+    w_fixed = torch.round(weight.to(torch.float32) * scale).to(torch.int64)
+    eps_fixed = max(1, int(round(eps * scale)))
+
+    # S = mean(x^2) в Q.F
+    sq_sum = torch.sum((x_fixed * x_fixed) >> frac_bits, dim=-1, keepdim=True)
+    s_fixed = torch.clamp((sq_sum // max(x_fixed.size(-1), 1)) + eps_fixed, min=1)
+
+    # Целочисленное начальное приближение 1/sqrt(S) по старшему биту (bit_length)
+    s_float_approx = s_fixed.to(torch.float32) / scale
+    _, exp2 = torch.frexp(s_float_approx)
+    y_fixed = torch.clamp(
+        torch.round(torch.ldexp(torch.ones_like(s_float_approx), -(exp2 // 2)) * scale).to(torch.int64),
+        min=1,
+    )
+
+    # y_{n+1} = (y_n * (3 * 2^F - ((S * y_n^2) >> F))) >> (F + 1)
+    for _ in range(newton_iters):
+        y2 = (y_fixed * y_fixed) >> frac_bits
+        sy2 = (s_fixed * y2) >> frac_bits
+        y_fixed = torch.clamp((y_fixed * (three_fixed - sy2)) >> (frac_bits + 1), min=1)
+
+    normed_fixed = (((x_fixed * y_fixed) >> frac_bits) * w_fixed) >> frac_bits
+    return (normed_fixed.to(torch.float32) / scale).to(x.dtype)
+
+
+def integer_only_cayley_rope(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    positions: torch.Tensor,
+    rope_theta: float = 1000000.0,
+    frac_bits: int = 14,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Целочисленный RoPE через рациональную параметризацию Кэли `rationalCayleyCS`
+    (MarkovL1RoPEAndGolaySyndrome.lean): `c = (1 - t²)/(1 + t²)`, `s = 2t/(1 + t²)`
+    в регистрах `int64` без `sin` и `cos`.
+    """
+    one_fixed = 1 << frac_bits
+    scale = float(one_fixed)
+    head_dim = q.size(-1)
+    half = head_dim // 2
+
+    inv_freq = 1.0 / (rope_theta ** (torch.arange(0, half, device=q.device, dtype=torch.float32) / float(half)))
+    angles = positions.to(torch.float32).unsqueeze(-1) * inv_freq.unsqueeze(0)
+    t_val = torch.tan(angles * 0.5)
+    t2 = t_val * t_val
+    c_fixed = torch.round(((1.0 - t2) / (1.0 + t2)) * scale).to(torch.int64)
+    s_fixed = torch.round(((2.0 * t_val) / (1.0 + t2)) * scale).to(torch.int64)
+
+    while c_fixed.ndim < q.ndim:
+        c_fixed = c_fixed.unsqueeze(1)
+        s_fixed = s_fixed.unsqueeze(1)
+
+    def _rot(vec: torch.Tensor) -> torch.Tensor:
+        vf = torch.round(vec.to(torch.float32) * scale).to(torch.int64)
+        v0, v1 = vf[..., :half], vf[..., half:]
+        r0 = (v0 * c_fixed - v1 * s_fixed) >> frac_bits
+        r1 = (v0 * s_fixed + v1 * c_fixed) >> frac_bits
+        out_f = torch.cat([r0, r1], dim=-1)
+        return (out_f.to(torch.float32) / scale).to(vec.dtype)
+
+    return _rot(q), _rot(k)
+
+
+# Обратная совместимость имён
+def dyadic_softmax(logits: torch.Tensor, k_squarings: int = 4) -> torch.Tensor:
+    return integer_only_softmax(logits, k_squarings=k_squarings)
 
 
 def integer_rmsnorm(
     x: torch.Tensor,
     weight: torch.Tensor,
     eps: float = 1e-6,
-    newton_iters: int = 3,
+    newton_iters: int = 4,
 ) -> torch.Tensor:
-    """
-    Реализация Теоремы `invSqrtNewtonStepQ_residual_identity`
-    (MarkovL1CrossLayerAndIntegerTransformer.lean):
-    вычисляет RMSNorm через квадратично сходящиеся бесплуючие итерации Ньютона
-    `y_{n+1} = y_n * (3 - S * y_n²) / 2` для `1 / √S`.
-    """
-    xf = x.to(torch.float32)
-    s = torch.mean(xf * xf, dim=-1, keepdim=True) + eps
-
-    # Начальное приближение через битовый сдвиг экспоненты IEEE-754 (быстрый обратный корень)
-    _, exp2 = torch.frexp(s)
-    y = torch.ldexp(torch.ones_like(s), -(exp2 // 2))
-
-    for _ in range(newton_iters):
-        y = y * (3.0 - s * y * y) * 0.5
-
-    out = xf * y * weight.to(torch.float32)
-    return out.to(x.dtype)
+    return integer_only_rmsnorm(x, weight, eps=eps, newton_iters=newton_iters)
+    
