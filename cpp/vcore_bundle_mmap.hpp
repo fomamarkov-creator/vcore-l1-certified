@@ -40,10 +40,10 @@ public:
         if (path.size() >= 6 && path.substr(path.size() - 6) == ".vcore") return true;
         int f = open(path.c_str(), O_RDONLY);
         if (f < 0) return false;
-        char magic = {0};
-        ssize_t n = read(f, magic, 8);
+        std::string magic(8, '\0');
+        ssize_t n = read(f, &magic[0], 8);
         close(f);
-        return (n == 8 && memcmp(magic, "VCORE5\x00\x01", 8) == 0);
+        return (n == 8 && memcmp(magic.data(), "VCORE5\x00\x01", 8) == 0);
     }
 
     bool open_bundle(const std::string& path) {
@@ -73,7 +73,6 @@ public:
         size_t header_end = 16 + (size_t)manifest_len;
         size_t data_base = (header_end % 64 == 0) ? header_end : (header_end + (64 - (header_end % 64)));
 
-        // Извлекаем значение certified_max_block_drift из JSON-манифеста для баннера
         size_t d_pos = manifest.find("\"certified_max_block_drift\"");
         if (d_pos != std::string::npos) {
             size_t col = manifest.find(':', d_pos);
@@ -83,7 +82,6 @@ public:
             }
         }
 
-        // Парсим массив "entries": [{"name": "...", "offset": ..., "size": ...}, ...]
         size_t ent_pos = manifest.find("\"entries\"");
         if (ent_pos == std::string::npos) return false;
 
