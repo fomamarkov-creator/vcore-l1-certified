@@ -1,364 +1,281 @@
 # Copyright (C) 2026 Efim Sergeevich Markov (ef.87@mail.ru)
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
-import argparse
 import json
 import os
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
-
 import torch
+from transformers import AutoTokenizer, TextIteratorStreamer
 from .backend_dispatcher import get_dispatcher
-from .inference_layer import (
-    VCoreDynamicCache,
-    VCoreModelForCausalLM,
-    _CPU_LIB,
-    _CUDA_LIB,
+from .calibration import collect_activation_importance
+from .gguf_exporter import export_vcore_to_gguf
+from .inference_layer import VCoreDynamicCache, VCoreModelForCausalLM
+from .safetensors_quantizer import (
+    repack_safetensors_layerwise,
+    repack_sharded_model,
+    repack_hf_hub_model,
 )
+from .vcore_bundle import unpack_vcore_bundle_to_temp
+
 
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>V-CORE (ℓ₁)-Certified • Neural Wave UI</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>V-CORE L1-Certified v5.0 | Wave Web Studio</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body {
-    width: 100%; height: 100%; overflow: hidden;
-    background: #0B0D17; color: #F0F6FC;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  :root {
+    --bg: #07090f; --panel: #0f1422; --border: #1e293b;
+    --accent: #38bdf8; --accent2: #818cf8; --text: #e2e8f0; --muted: #94a3b8;
   }
-  canvas#waveCanvas {
-    position: fixed; inset: 0; width: 100%; height: 100%;
-    z-index: 0; touch-action: none;
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { background: var(--bg); color: var(--text); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  header {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+    padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
   }
-  .app {
-    position: relative; z-index: 1;
-    display: flex; flex-direction: column;
-    max-width: 860px; height: 100%; margin: 0 auto;
-    padding: 12px; pointer-events: none;
+  .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 16px; letter-spacing: 0.4px; }
+  .badge { background: rgba(56,189,248,0.15); color: var(--accent); padding: 3px 10px; border-radius: 99px; font-size: 12px; border: 1px solid rgba(56,189,248,0.35); }
+  .hw-pill { background: rgba(129,140,248,0.15); color: #c7d2fe; padding: 3px 10px; border-radius: 99px; font-size: 12px; border: 1px solid rgba(129,140,248,0.35); }
+  #wave-canvas { width: 100%; height: 64px; background: linear-gradient(180deg, #0b101d 0%, #07090f 100%); border-bottom: 1px solid var(--border); }
+  .main { display: flex; flex: 1; overflow: hidden; }
+  .sidebar { width: 320px; background: var(--panel); border-right: 1px solid var(--border); padding: 16px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
+  .card { background: rgba(15,23,42,0.7); border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); }
+  input, select {
+    width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: #090d16; color: var(--text); font-size: 13px;
   }
-  .topbar, .chat-card, .input-bar {
-    pointer-events: auto;
-    background: rgba(13, 17, 23, 0.62);
-    backdrop-filter: blur(14px);
-    -webkit-backdrop-filter: blur(14px);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 16px;
+  button {
+    padding: 9px 12px; border-radius: 6px; border: none; font-weight: 600; font-size: 13px; cursor: pointer;
+    background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #050811; transition: opacity 0.15s;
   }
-  .topbar {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 16px; margin-bottom: 10px; gap: 8px; flex-wrap: wrap;
-  }
-  .brand { font-weight: 700; font-size: 15px; letter-spacing: 0.3px; }
-  .badge {
-    font-size: 12px; padding: 4px 10px; border-radius: 999px;
-    background: rgba(63, 185, 80, 0.18); color: #3FB950;
-    border: 1px solid rgba(63, 185, 80, 0.35);
-  }
-  .model-bar { display: flex; gap: 6px; align-items: center; }
-  .model-bar input {
-    background: rgba(9, 12, 16, 0.75); color: #fff;
-    border: 1px solid rgba(255,255,255,0.16); border-radius: 10px;
-    padding: 6px 10px; font-size: 13px; width: 190px;
-  }
-  .btn {
-    background: rgba(88, 166, 255, 0.22); color: #79C0FF;
-    border: 1px solid rgba(88, 166, 255, 0.4); border-radius: 10px;
-    padding: 6px 12px; font-size: 13px; font-weight: 600; cursor: pointer;
-  }
-  .btn:hover { background: rgba(88, 166, 255, 0.35); }
-  .chat-card {
-    flex: 1; overflow-y: auto; padding: 16px; margin-bottom: 10px;
-    display: flex; flex-direction: column; gap: 12px;
-  }
-  .msg {
-    max-width: 82%; padding: 12px 16px; border-radius: 16px;
-    line-height: 1.5; font-size: 14px; white-space: pre-wrap;
-  }
-  .msg.user {
-    align-self: flex-end;
-    background: rgba(31, 111, 235, 0.45);
-    border: 1px solid rgba(88, 166, 255, 0.35);
-  }
-  .msg.bot {
-    align-self: flex-start;
-    background: rgba(22, 27, 34, 0.72);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-  }
-  .meta { font-size: 11px; color: #8B949E; margin-top: 6px; }
-  .input-bar {
-    display: flex; gap: 8px; padding: 10px; align-items: center;
-  }
-  .input-bar input {
-    flex: 1; background: transparent; border: none; outline: none;
-    color: #fff; font-size: 15px; padding: 6px 8px;
-  }
-  .send-btn {
-    background: #238636; color: #fff; border: none; border-radius: 12px;
-    padding: 10px 18px; font-weight: 700; font-size: 14px; cursor: pointer;
-  }
-  .send-btn:disabled { opacity: 0.5; cursor: default; }
+  button:hover { opacity: 0.9; }
+  button.secondary { background: #1e293b; color: var(--text); }
+  .chat-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+  .msg { max-width: 82%; padding: 12px 16px; border-radius: 12px; line-height: 1.5; font-size: 14px; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: #1d4ed8; color: #fff; border-bottom-right-radius: 2px; }
+  .msg.bot { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 2px; }
+  .input-bar { padding: 14px 20px; background: var(--panel); border-top: 1px solid var(--border); display: flex; gap: 10px; }
+  .input-bar input { flex: 1; font-size: 14px; padding: 10px 14px; }
+  .status-line { font-size: 12px; color: var(--muted); }
+  @media (max-width: 768px) { .main { flex-direction: column; } .sidebar { width: 100%; max-height: 44vh; border-right: none; border-bottom: 1px solid var(--border); } }
 </style>
 </head>
 <body>
-<canvas id="waveCanvas"></canvas>
-<div class="app">
-  <div class="topbar">
-    <div class="brand">V-CORE (ℓ₁) • Wave Studio</div>
-    <div class="badge" id="hwBadge">Загрузка статуса...</div>
-    <div class="model-bar">
-      <input id="modelPath" placeholder="./qwen15_vcore" />
-      <button class="btn" onclick="loadModel()">Загрузить</button>
+<header>
+  <div class="brand">
+    <span>V-CORE L1-CERTIFIED</span>
+    <span class="badge">v5.0 | E8 &amp; Integer-Only Q14</span>
+    <span class="hw-pill" id="hw-banner">Сканирование железа...</span>
+  </div>
+  <div class="status-line" id="status-text">Модель не загружена</div>
+</header>
+<canvas id="wave-canvas"></canvas>
+<div class="main">
+  <div class="sidebar">
+    <div class="card">
+      <h3>1. Сжатие модели (vcore-pack)</h3>
+      <input id="pack-src" placeholder="HF Repo (Qwen/Qwen2.5-1.5B) или путь">
+      <input id="pack-dst" placeholder="Выходная папка (./qwen_vcore)" value="./qwen_vcore">
+      <div style="display:flex; gap:8px;">
+        <input id="pack-vram" type="number" step="0.5" placeholder="Авто-бюджет ГБ">
+        <input id="pack-calib" type="number" value="0" placeholder="Калибр.">
+      </div>
+      <select id="pack-sph">
+        <option value="auto">Сферические E8 эмбеддинги: Авто (по памяти)</option>
+        <option value="on">Сферические E8 эмбеддинги: Вкл (~1.0 b/w)</option>
+        <option value="off">Сферические E8 эмбеддинги: Выкл (FP16)</option>
+      </select>
+      <button onclick="runPack()">Сжать модель (Cross-Layer + L1)</button>
+      <div class="status-line" id="pack-log">Готов к упаковке</div>
+    </div>
+    <div class="card">
+      <h3>2. Загрузка модели / .vcore</h3>
+      <input id="load-dir" placeholder="Путь к папке модели или model.vcore" value="./qwen_vcore">
+      <div style="display:flex; gap:8px;">
+        <select id="load-dev">
+          <option value="auto">Device: Авто</option>
+          <option value="cuda">CUDA (GPU)</option>
+          <option value="mps">Apple MPS</option>
+          <option value="cpu">CPU (AVX2 / NEON)</option>
+        </select>
+        <select id="load-int">
+          <option value="false">Float / AVX2</option>
+          <option value="true">Integer-Only Q14</option>
+        </select>
+      </div>
+      <button onclick="loadModel()">Загрузить модель</button>
+    </div>
+    <div class="card">
+      <h3>3. Параметры диалога</h3>
+      <div style="display:flex; gap:8px;">
+        <input id="gen-tokens" type="number" value="256" title="Max tokens">
+        <input id="gen-temp" type="number" step="0.1" value="0.7" title="Temperature">
+      </div>
+      <select id="kv-mode">
+        <option value="spherical">KV-кэш: Spherical E8 (1.0 b/w)</option>
+        <option value="int4">KV-кэш: INT4</option>
+        <option value="ternary">KV-кэш: 2-bit Ternary</option>
+      </select>
+      <button class="secondary" onclick="clearChat()">Очистить чат</button>
     </div>
   </div>
-  <div class="chat-card" id="chatBox">
-    <div class="msg bot">Коснитесь экрана в любом месте — по частицам пойдёт волновая интерференция. Укажите путь к сжатой папке модели сверху и нажмите «Загрузить».</div>
-  </div>
-  <div class="input-bar">
-    <input id="promptInput" placeholder="Задайте вопрос нейросети..." onkeydown="if(event.key==='Enter')sendMsg()" />
-    <button class="send-btn" id="sendBtn" onclick="sendMsg()">Пуск ➤</button>
+  <div class="chat-wrap">
+    <div id="messages">
+      <div class="msg bot">Привет! Я V-CORE Wave Studio v5.0. Железо определено автоматически — выбери или сожми модель слева и пиши свой запрос.</div>
+    </div>
+    <div class="input-bar">
+      <input id="prompt-input" placeholder="Введите сообщение..." onkeydown="if(event.key==='Enter') sendMsg()">
+      <button onclick="sendMsg()">Отправить</button>
+    </div>
   </div>
 </div>
-
 <script>
-const cv = document.getElementById('waveCanvas');
-const ctx = cv.getContext('2d');
-let W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
-const ripples = [];
-let tGlobal = 0;
+const canvas = document.getElementById('wave-canvas');
+const ctx = canvas.getContext('2d');
+let waveAmp = 8, targetAmp = 8, phase = 0;
 
-function resize() {
-  W = window.innerWidth; H = window.innerHeight;
-  cv.width = W * dpr; cv.height = H * dpr;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+function resizeCanvas() {
+  canvas.width = canvas.offsetWidth * window.devicePixelRatio;
+  canvas.height = canvas.offsetHeight * window.devicePixelRatio;
 }
-window.addEventListener('resize', resize);
-resize();
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
 
-function spawnRipple(x, y, amp = 1.0) {
-  ripples.push({ x, y, t: tGlobal, amp });
-  if (ripples.length > 14) ripples.shift();
-}
-
-let lastMove = 0;
-window.addEventListener('pointerdown', e => spawnRipple(e.clientX, e.clientY, 1.35));
-window.addEventListener('pointermove', e => {
-  if (e.buttons > 0 || e.pointerType === 'touch') {
-    const now = performance.now();
-    if (now - lastMove > 55) { spawnRipple(e.clientX, e.clientY, 0.75); lastMove = now; }
-  }
-});
-
-setInterval(() => {
-  if (ripples.length < 3) spawnRipple(W * (0.2 + 0.6 * Math.random()), H * (0.2 + 0.6 * Math.random()), 0.6);
-}, 3800);
-
-function drawBackground(t) {
-  const base = ctx.createLinearGradient(0, 0, W, H);
-  base.addColorStop(0, '#161338');
-  base.addColorStop(0.5, '#3B185F');
-  base.addColorStop(1, '#1A103C');
-  ctx.fillStyle = base;
-  ctx.fillRect(0, 0, W, H);
-
-  const blobs = [
-    { x: W * (0.25 + 0.15 * Math.sin(t * 0.4)), y: H * (0.25 + 0.12 * Math.cos(t * 0.3)), r: Math.max(W, H) * 0.55, c: 'rgba(56, 189, 248, 0.28)' },
-    { x: W * (0.78 + 0.14 * Math.cos(t * 0.35)), y: H * (0.35 + 0.16 * Math.sin(t * 0.45)), r: Math.max(W, H) * 0.52, c: 'rgba(236, 72, 153, 0.32)' },
-    { x: W * (0.55 + 0.18 * Math.sin(t * 0.28)), y: H * (0.78 + 0.12 * Math.cos(t * 0.38)), r: Math.max(W, H) * 0.58, c: 'rgba(251, 146, 60, 0.30)' }
-  ];
-  ctx.globalCompositeOperation = 'screen';
-  for (const b of blobs) {
-    const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
-    g.addColorStop(0, b.c); g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-  }
-  ctx.globalCompositeOperation = 'source-over';
-}
-
-function frame() {
-  tGlobal += 0.032;
-  drawBackground(tGlobal);
-  for (let i = ripples.length - 1; i >= 0; i--) {
-    if (tGlobal - ripples[i].t > 5.5) ripples.splice(i, 1);
-  }
-  const spacing = 26;
-  const cols = Math.ceil(W / spacing) + 1;
-  const rows = Math.ceil(H / spacing) + 1;
-
-  for (let r = 0; r < rows; r++) {
-    const y0 = r * spacing;
-    for (let c = 0; c < cols; c++) {
-      const x0 = c * spacing;
-      let hSum = 0, dx = 0, dy = 0;
-      for (let k = 0; k < ripples.length; k++) {
-        const rp = ripples[k];
-        const age = tGlobal - rp.t;
-        const vx = x0 - rp.x, vy = y0 - rp.y;
-        const dist = Math.hypot(vx, vy) + 0.001;
-        const band = dist - age * 145.0;
-        if (Math.abs(band) < 130.0) {
-          const env = Math.exp(-(band * band) / 2600.0) * Math.exp(-age * 0.55) * rp.amp;
-          const wave = Math.sin(band * 0.14) * env;
-          hSum += wave;
-          dx += (vx / dist) * wave * 5.5;
-          dy += (vy / dist) * wave * 5.5;
-        }
-      }
-      const energy = Math.min(1.5, Math.max(-0.6, hSum));
-      const radius = Math.max(0.9, 1.45 + energy * 1.45);
-      const alpha = Math.min(0.95, Math.max(0.14, 0.24 + energy * 0.45));
-      ctx.beginPath();
-      ctx.arc(x0 + dx, y0 + dy, radius, 0, Math.PI * 2);
-      ctx.fillStyle = energy > 0.25 ? `rgba(255, 245, 230, ${alpha})` : `rgba(190, 225, 255, ${alpha})`;
-      ctx.fill();
+function drawWave() {
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  waveAmp += (targetAmp - waveAmp) * 0.08;
+  phase += 0.045;
+  const colors = ['rgba(56,189,248,0.85)', 'rgba(129,140,248,0.65)', 'rgba(16,185,129,0.45)'];
+  colors.forEach((col, idx) => {
+    ctx.beginPath();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2.2 * window.devicePixelRatio;
+    for (let x = 0; x <= w; x += 6) {
+      const freq = 0.008 + idx * 0.003;
+      const y = h / 2 + Math.sin(x * freq + phase + idx * 1.3) * waveAmp * window.devicePixelRatio * Math.sin((x / w) * Math.PI);
+      if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
-  }
-  requestAnimationFrame(frame);
+    ctx.stroke();
+  });
+  requestAnimationFrame(drawWave);
 }
-frame();
-
-function addMsg(text, who, meta = '') {
-  const box = document.getElementById('chatBox');
-  const div = document.createElement('div');
-  div.className = 'msg ' + who;
-  div.textContent = text;
-  if (meta) {
-    const m = document.createElement('div');
-    m.className = 'meta'; m.textContent = meta;
-    div.appendChild(m);
-  }
-  box.appendChild(div);
-  box.scrollTop = box.scrollHeight;
-  return div;
-}
+drawWave();
 
 async function refreshStatus() {
-  const r = await fetch('/api/status'); const d = await r.json();
-  document.getElementById('hwBadge').textContent = d.backend + (d.model ? ' • ' + d.model : '');
-  if (d.model_path) document.getElementById('modelPath').value = d.model_path;
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    if (d.hw_banner) document.getElementById('hw-banner').textContent = d.hw_banner;
+    if (d.recommended_budget && !document.getElementById('pack-vram').value) {
+      document.getElementById('pack-vram').placeholder = `Авто: ${d.recommended_budget} ГБ`;
+    }
+    if (d.loaded) {
+      let certTxt = d.cert_drift ? ` | Lean4 Drift <= ${d.cert_drift}` : '';
+      document.getElementById('status-text').textContent = `Активна: ${d.model_path} (${d.device.toUpperCase()}${certTxt})`;
+    }
+  } catch (e) {}
 }
 refreshStatus();
 
-async function loadModel() {
-  const p = document.getElementById('modelPath').value.trim();
-  if (!p) return;
-  const note = addMsg('Загрузка модели ' + p + '...', 'bot');
-  spawnRipple(W * 0.5, H * 0.3, 1.4);
-  const r = await fetch('/api/load', { method: 'POST', body: JSON.stringify({ path: p }) });
+async function runPack() {
+  const src = document.getElementById('pack-src').value.trim();
+  const dst = document.getElementById('pack-dst').value.trim();
+  const vram = document.getElementById('pack-vram').value;
+  const calib = document.getElementById('pack-calib').value;
+  const sph = document.getElementById('pack-sph').value;
+  if (!src || !dst) return alert('Укажите источник и выходную папку!');
+  document.getElementById('pack-log').textContent = 'Сжатие модели...';
+  targetAmp = 24;
+  const r = await fetch('/api/pack', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({src, dst, vram, calib, sph})
+  });
   const d = await r.json();
-  note.textContent = d.ok ? 'Модель подключена: ' + d.model + ' (' + d.load_sec + ' с)' : 'Ошибка: ' + d.error;
-  refreshStatus();
+  targetAmp = 8;
+  document.getElementById('pack-log').textContent = d.message || d.error;
+  if (!d.error) document.getElementById('load-dir').value = dst;
+}
+
+async function loadModel() {
+  const model_dir = document.getElementById('load-dir').value.trim();
+  const device = document.getElementById('load-dev').value;
+  const integer_only = document.getElementById('load-int').value === 'true';
+  document.getElementById('status-text').textContent = 'Загрузка модели...';
+  targetAmp = 20;
+  const r = await fetch('/api/load', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({model_dir, device, integer_only})
+  });
+  const d = await r.json();
+  targetAmp = 8;
+  if (d.error) {
+    document.getElementById('status-text').textContent = 'Ошибка: ' + d.error;
+  } else {
+    refreshStatus();
+  }
+}
+
+async function clearChat() {
+  await fetch('/api/clear', {method: 'POST'});
+  document.getElementById('messages').innerHTML = '';
 }
 
 async function sendMsg() {
-  const inp = document.getElementById('promptInput');
-  const btn = document.getElementById('sendBtn');
-  const txt = inp.value.trim();
-  if (!txt) return;
-  inp.value = ''; btn.disabled = true;
-  addMsg(txt, 'user');
-  spawnRipple(W * 0.5, H * 0.5, 1.2);
-  const botDiv = addMsg('Думаю...', 'bot');
-  try {
-    const r = await fetch('/api/chat', { method: 'POST', body: JSON.stringify({ prompt: txt }) });
-    const d = await r.json();
-    spawnRipple(W * 0.5, H * 0.5, 1.5);
-    botDiv.textContent = d.reply || d.error;
-    if (d.meta) {
-      const m = document.createElement('div'); m.className = 'meta'; m.textContent = d.meta;
-      botDiv.appendChild(m);
-    }
-  } catch (e) { botDiv.textContent = 'Ошибка соединения: ' + e; }
-  btn.disabled = false;
+  const inp = document.getElementById('prompt-input');
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.value = '';
+  const box = document.getElementById('messages');
+  const uDiv = document.createElement('div'); uDiv.className = 'msg user'; uDiv.textContent = text; box.appendChild(uDiv);
+  const bDiv = document.createElement('div'); bDiv.className = 'msg bot'; bDiv.textContent = '...'; box.appendChild(bDiv);
+  box.scrollTop = box.scrollHeight;
+  targetAmp = 26;
+
+  const max_tokens = parseInt(document.getElementById('gen-tokens').value || '256');
+  const temperature = parseFloat(document.getElementById('gen-temp').value || '0.7');
+  const kv_mode = document.getElementById('kv-mode').value;
+
+  const r = await fetch('/api/chat', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: text, max_tokens, temperature, kv_mode})
+  });
+  const d = await r.json();
+  targetAmp = 8;
+  bDiv.textContent = d.reply || ('Ошибка: ' + d.error);
+  if (d.speed) document.getElementById('status-text').textContent = `Скорость: ${d.speed} | KV: ${kv_mode}`;
+  box.scrollTop = box.scrollHeight;
 }
 </script>
 </body>
 </html>
 """
-class VCoreWebState:
-    def __init__(self, initial_model: Optional[str] = None):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = torch.float16 if self.device == "cuda" else torch.float32
+
+
+class WebStudioState:
+    def __init__(self):
+        self.dispatcher = get_dispatcher()
+        self.hw = self.dispatcher.profile
         self.model = None
         self.tokenizer = None
-        self.model_path = initial_model or ""
-        self.model_name = ""
+        self.model_path = ""
+        self.device = self.hw.recommended_device
+        self.certificate_info: Optional[Dict[str, Any]] = None
+        self._tmp_bundle = None
         self.history: List[Dict[str, str]] = []
-
-        if torch.cuda.is_available() and _CUDA_LIB is not None:
-            self.backend = f"CUDA ({torch.cuda.get_device_name(0)})"
-        elif _CPU_LIB is not None:
-            self.backend = "Native AVX2 CPU"
-        else:
-            self.backend = f"PyTorch ({self.device.upper()})"
-
-        if self.model_path and os.path.exists(self.model_path):
-            self.load(self.model_path)
-
-    def load(self, path: str) -> Dict[str, Any]:
-        from transformers import AutoTokenizer
-
-        if not os.path.exists(path):
-            return {"ok": False, "error": f"Путь не найден: {path}"}
-        t0 = time.perf_counter()
-        self.tokenizer = AutoTokenizer.from_pretrained(path)
-        self.model = VCoreModelForCausalLM.from_vcore_pretrained(
-            path, device=self.device, dtype=self.dtype
-        )
-        dt = time.perf_counter() - t0
-        self.model_path = path
-        self.model_name = os.path.basename(os.path.abspath(path))
-        self.history.clear()
-        return {"ok": True, "model": self.model_name, "load_sec": round(dt, 2)}
-
-    def chat(self, prompt: str, max_new_tokens: int = 192) -> Dict[str, Any]:
-        if self.model is None or self.tokenizer is None:
-            return {"error": "Сначала загрузите сжатую модель сверху."}
-
-        self.history.append({"role": "user", "content": prompt})
-        msgs = [{"role": "system", "content": "You are V-CORE, a helpful AI assistant."}] + self.history[-6:]
-
-        if hasattr(self.tokenizer, "apply_chat_template"):
-            text_in = self.tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-        else:
-            text_in = prompt
-
-        inputs = self.tokenizer(text_in, return_tensors="pt").to(self.device)
-        in_len = inputs["input_ids"].shape[1]
-        kv = VCoreDynamicCache(group_size=32, bits=4)
-
-        t0 = time.perf_counter()
-        with torch.no_grad():
-            out_ids = self.model.generate(
-                **inputs,
-                past_key_values=kv,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-            )
-        dt = max(time.perf_counter() - t0, 1e-6)
-        gen_ids = out_ids[0][in_len:]
-        reply = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
-        self.history.append({"role": "assistant", "content": reply})
-
-        n_tok = int(gen_ids.numel())
-        return {
-            "reply": reply,
-            "meta": f"{n_tok} токенов • {n_tok / dt:.1f} tok/s • {dt:.2f} с ({self.backend})",
-        }
+        self.lock = threading.Lock()
 
 
-def run_web_server(host: str = "0.0.0.0", port: int = 8080, initial_model: Optional[str] = None):
-    get_dispatcher().profile.summary_banner()
-    state = VCoreWebState(initial_model=initial_model)
-
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, _fmt, *_args):
-            pass
-
-        def _send_json(self, payload: Dict[str, Any], code: int = 200):
+def create_handler(state: WebStudioState):
+    class VCoreWebHandler(BaseHTTPRequestHandler):
+        def _send_json(self, code: int, payload: Dict[str, Any]):
             raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -367,47 +284,149 @@ def run_web_server(host: str = "0.0.0.0", port: int = 8080, initial_model: Optio
             self.wfile.write(raw)
 
         def do_GET(self):
-            if self.path == ""hardware": get_dispatcher().profile.to_dict()":
-                self._send_json({
-                    "backend": state.backend,
-                    "model": state.model_name,
-                    "model_path": state.model_path,
-                })
-            else:
-                body = HTML_PAGE.encode("utf-8")
+            if self.path == "/" or self.path == "/index.html":
+                raw = HTML_PAGE.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(raw)
+            elif self.path == "/api/status":
+                self._send_json(200, {
+                    "loaded": state.model is not None,
+                    "model_path": state.model_path,
+                    "device": state.device,
+                    "hw_banner": f"{state.hw.gpu_name} | {state.hw.simd_backend} | RAM {state.hw.ram_free_gb:.1f}GB",
+                    "recommended_budget": state.hw.recommended_vram_budget_gb,
+                    "cert_drift": state.certificate_info.get("certified_max_block_drift") if state.certificate_info else None,
+                })
+            else:
+                self._send_json(404, {"error": "Not found"})
 
         def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
-            if self.path == "/api/load":
-                self._send_json(state.load(data.get("path", "")))
-            elif self.path == "/api/chat":
-                self._send_json(state.chat(data.get("prompt", "")))
-            else:
-                self._send_json({"error": "Not found"}, code=404)
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
 
-    server = ThreadingHTTPServer((host, port), Handler)
-    print(f"[V-CORE Wave UI] Сервер запущен: http://localhost:{port} ({state.backend})")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n[V-CORE Wave UI] Остановлен.")
+            try:
+                if self.path == "/api/pack":
+                    src = body["src"]
+                    dst = body["dst"]
+                    vram = float(body["vram"]) if body.get("vram") else state.hw.recommended_vram_budget_gb
+                    calib = int(body.get("calib", 0))
+                    sph_mode = body.get("sph", "auto")
+                    sph_emb = state.hw.recommended_spherical_emb if sph_mode == "auto" else (sph_mode == "on")
+
+                    act_map, chol_map = None, None
+                    if calib > 0:
+                        act_map, chol_map = collect_activation_importance(src, num_samples=calib, collect_covariance=True)
+
+                    if os.path.isfile(src):
+                        st = repack_safetensors_layerwise(src, dst, target_vram_gb=vram, activation_map=act_map, chol_map=chol_map, spherical_emb=sph_emb)
+                    elif os.path.isdir(src):
+                        st = repack_sharded_model(src, dst, target_vram_gb=vram, activation_map=act_map, chol_map=chol_map, spherical_emb=sph_emb)
+                    else:
+                        st = repack_hf_hub_model(src, dst, target_vram_gb=vram, activation_map=act_map, chol_map=chol_map, spherical_emb=sph_emb)
+                    self._send_json(200, {"message": f"Готово! Сжатие {st['compression_ratio']:.2f}x ({st['packed_size_mb']:.1f} МБ)"})
+
+                elif self.path == "/api/load":
+                    with state.lock:
+                        model_dir = body["model_dir"]
+                        req_dev = body.get("device", "auto")
+                        dev = state.hw.recommended_device if req_dev == "auto" else req_dev
+                        int_only = bool(body.get("integer_only", False))
+
+                        load_target = model_dir
+                        state.certificate_info = None
+                        if os.path.isfile(model_dir) and model_dir.endswith(".vcore"):
+                            state._tmp_bundle, state.certificate_info = unpack_vcore_bundle_to_temp(model_dir)
+                            load_target = state._tmp_bundle.name
+
+                        dtype = torch.float16 if dev in ("cuda", "mps") else torch.float32
+                        state.tokenizer = AutoTokenizer.from_pretrained(load_target, trust_remote_code=True)
+                        state.model = VCoreModelForCausalLM.from_vcore_pretrained(
+                            load_target, device=dev, dtype=dtype, integer_only=int_only
+                        )
+                        state.model_path = model_dir
+                        state.device = dev
+                        state.history = []
+                    self._send_json(200, {"ok": True})
+
+                elif self.path == "/api/clear":
+                    with state.lock:
+                        state.history = []
+                    self._send_json(200, {"ok": True})
+
+                elif self.path == "/api/chat":
+                    with state.lock:
+                        if state.model is None:
+                            self._send_json(400, {"error": "Сначала загрузите модель!"})
+                            return
+                        state.history.append({"role": "user", "content": body["message"]})
+                        if hasattr(state.tokenizer, "apply_chat_template"):
+                            prompt = state.tokenizer.apply_chat_template(state.history, tokenize=False, add_generation_prompt=True)
+                        else:
+                            prompt = "\n".join([f"{m['role']}: {m['content']}" for m in state.history]) + "\nassistant: "
+
+                        inputs = state.tokenizer(prompt, return_tensors="pt").to(state.device)
+                        kv_mode = body.get("kv_mode", "spherical")
+                        cache = VCoreDynamicCache(group_size=32, mode=kv_mode)
+                        max_tok = int(body.get("max_tokens", 256))
+                        temp = float(body.get("temperature", 0.7))
+
+                        t0 = time.time()
+                        with torch.no_grad():
+                            out_ids = state.model.generate(
+                                **inputs,
+                                max_new_tokens=max_tok,
+                                past_key_values=cache,
+                                do_sample=(temp > 0.0),
+                                temperature=max(temp, 1e-4) if temp > 0.0 else None,
+                            )
+                        elapsed = max(time.time() - t0, 1e-5)
+                        gen_only = out_ids[0, inputs["input_ids"].shape:]
+                        reply = state.tokenizer.decode(gen_only, skip_special_tokens=True)
+                        state.history.append({"role": "assistant", "content": reply})
+                        speed = f"{len(gen_only) / elapsed:.1f} ток/с"
+                    self._send_json(200, {"reply": reply, "speed": speed})
+                else:
+                    self._send_json(404, {"error": "Not found"})
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+
+        def log_message(self, format, *args):
+            pass
+
+    return VCoreWebHandler
+
+
+def run_web_server(host: str = "127.0.0.1", port: int = 7860, initial_model: Optional[str] = None):
+    state = WebStudioState()
+    print(f"[HW-DISPATCH] {state.hw.summary_banner()}")
+    if initial_model:
+        load_target = initial_model
+        if os.path.isfile(initial_model) and initial_model.endswith(".vcore"):
+            state._tmp_bundle, state.certificate_info = unpack_vcore_bundle_to_temp(initial_model)
+            load_target = state._tmp_bundle.name
+        dtype = torch.float16 if state.device in ("cuda", "mps") else torch.float32
+        state.tokenizer = AutoTokenizer.from_pretrained(load_target, trust_remote_code=True)
+        state.model = VCoreModelForCausalLM.from_vcore_pretrained(load_target, device=state.device, dtype=dtype)
+        state.model_path = initial_model
+
+    server = ThreadingHTTPServer((host, port), create_handler(state))
+    print(f"[V-CORE Web Studio] Сервер запущен: http://{host}:{port}")
+    server.serve_forever()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="V-CORE Wave Particle Gradient Web UI")
-    parser.add_argument("--model", "-m", default=None, help="Путь к сжатой модели V-CORE")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8080)
+    import argparse
+    parser = argparse.ArgumentParser(description="V-CORE L1-Certified Interactive Wave Web UI")
+    parser.add_argument("--host", default="127.0.0.1", help="Хост (по умолчанию 127.0.0.1)")
+    parser.add_argument("--port", "-p", type=int, default=7860, help="Порт (по умолчанию 7860)")
+    parser.add_argument("--model", "-m", default=None, help="Путь к модели или .vcore для автозагрузки")
     args = parser.parse_args()
     run_web_server(host=args.host, port=args.port, initial_model=args.model)
 
 
 if __name__ == "__main__":
     main()
-      
+                            
