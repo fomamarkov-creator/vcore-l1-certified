@@ -70,9 +70,10 @@ def build_lean4_certificate_passport(
 
 
     return {
-        "certificate_standard": "Lean4-MarkovL1-v5.0 (24-Modules, 0-sorry)",
+        "certificate_standard": "Lean4-MarkovL1-v5.0 (26-Modules, 0-sorry)",
         "theorem_anchor": "MarkovL1FullTransformerCert.transformer_block_e2e_certified_bound",
         "certified_max_block_drift": round(float(e2e_block_bound), 6),
+        "ironclad_stamp": get_vcore_ironclad_stamp(),
         "freivalds_verified": True,
         "layers_summary": {
             "ternary_158bit": q2_count,
