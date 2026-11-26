@@ -1,4 +1,4 @@
-name: V-CORE L1-Certified CI (Lean 4 + C++/AVX2/NEON + PyTorch)
+name: V-CORE L1-Certified CI (Lean 4 + CUDA + C++/AVX2/NEON + PyTorch)
 
 on:
   push:
@@ -13,29 +13,61 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Lean 4 (elan) & Build Formal Certifier
+      - name: Init Lake manifest
+        run: printf '{"version":"1.1.0","packagesDir":".lake/packages","packages":[]}\n' > lake-manifest.json
+
+      - name: Install Lean 4 (lean-action)
+        uses: leanprover/lean-action@v1
+        with:
+          build: false
+
+      - name: Build & Verify Lean 4 Certifier
         run: |
-          set -e
-          curl --retry 3 -sSf https://githubusercontent.com | sh -s -- -y --default-toolchain leanprover/lean4:v4.37.0-rc1
-          export PATH="$HOME/.elan/bin:$PATH"
-          lake build vcore_certifier
-          ./.lake/build/bin/vcore_certifier --verify-bench
+          lake update
+          lake exe cache get
+          lake build
+          lake exe vcore_certifier --verify-bench
 
       - name: Build Native C++17 / AVX2 / NEON Engine
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j$(nproc)
           ./build/vcore-run
 
-      - name: Set up Python 3.11 & Run End-to-End Quantization Tests
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies & Run test_quantizer.py
         run: |
-          export PATH="$HOME/.elan/bin:$PATH"
-          pip install numpy safetensors torch --index-url https://pytorch.org
-          pip install -e .
+          pip install numpy safetensors huggingface-hub torch rich
+          pip install -e . --no-deps
           python3 -u test_quantizer.py 2>&1
-          
+
+  cuda-build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit 12.1
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.1.0"
+          method: "network"
+
+      - name: Build CUDA + CPU/NEON Shared Libraries
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j
+
+      - name: Upload Compiled Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: libvcore_engine-cuda12-all-gpus
+          path: |
+            build/libvcore_engine.so
+            build/libvcore_cpu.so
+            build/libvcore_lut_neon.so
+            
