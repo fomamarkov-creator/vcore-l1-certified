@@ -230,7 +230,7 @@ def main():
     assert w2_c.shape == w2_f.shape and drift_ratio <= 1.0
 
     emb_q, max_chord = quantize_spherical_code(torch.randn(16, 64), lattice="e8", hyperbolic_poincare=True)
-        assert emb_q.shape == (16, 64) and max_chord < 2.0
+    assert emb_q.shape == (16, 64) and max_chord < 2.0
 
     sm_int = integer_only_softmax(torch.randn(4, 16), k_squarings=5, frac_bits=20)
     assert torch.allclose(sm_int.sum(dim=-1), torch.ones(4), atol=1e-4)
