@@ -5,24 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vcore-l1-certified"
 version = "5.0.0"
-description = "Hybrid Lean 4 + GPU 1.58-bit & INT4 Neural Network Quantizer, Inference Engine & GGUF Exporter"
+description = "V-CORE (L1)-Certified: Formally Verified (Lean 4) 1.58-bit, E8/Λ32 Lattice, Integer-Only Q14 & QAT Engine"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "AGPL-3.0-or-later"}
 authors = [
-    {name = "E. S. Markov", email = "ef.87@mail.ru"}
+    {name = "Efim Sergeevich Markov", email = "ef.87@mail.ru"}
 ]
 dependencies = [
-    "numpy>=1.24.0",
-    "torch>=2.0.0",
+    "torch>=2.1.0",
     "safetensors>=0.4.0",
+    "numpy>=1.24.0",
     "huggingface-hub>=0.20.0",
-    "gguf>=0.10.0",
+    "transformers>=4.40.0",
     "rich>=13.0.0"
 ]
-
-[project.optional-dependencies]
-transformers = ["transformers>=4.40.0"]
 
 [project.scripts]
 vcore-pack = "vcore_l1.cli:main"
@@ -31,6 +28,7 @@ vcore-export-gguf = "vcore_l1.gguf_exporter:main"
 vcore-ui = "vcore_l1.tui:main"
 vcore-web = "vcore_l1.web_ui:main"
 vcore-serve = "vcore_l1.openai_api:main"
+vcore-train = "vcore_l1.train_cli:main"
 
-[tool.setuptools]
-packages = ["vcore_l1"]
+[tool.setuptools.packages.find]
+include = ["vcore_l1*"]
