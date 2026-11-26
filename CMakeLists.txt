@@ -34,12 +34,14 @@ include(CheckLanguage)
 check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
     set(CMAKE_CUDA_STANDARD 17)
     add_library(vcore_engine SHARED
         cuda/VCoreEngine.cpp
         cuda/vcore_quantize_kernel.cu
         cuda/vcore_e8_lut_kernel.cu
     )
+    target_link_libraries(vcore_engine PRIVATE CUDA::cudart)
     set_target_properties(vcore_engine PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_ARCHITECTURES "75;80;86;89;90"
