@@ -30,6 +30,7 @@ vcore-bench = "vcore_l1.bench:main"
 vcore-export-gguf = "vcore_l1.gguf_exporter:main"
 vcore-ui = "vcore_l1.tui:main"
 vcore-web = "vcore_l1.web_ui:main"
+vcore-serve = "vcore_l1.openai_api:main"
 
 [tool.setuptools]
 packages = ["vcore_l1"]
