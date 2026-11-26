@@ -15,7 +15,8 @@ jobs:
 
       - name: Install Lean 4 (elan) & Build Formal Certifier
         run: |
-          curl https://githubusercontent.com -sSf | sh -s -- -y --default-toolchain leanprover/lean4:v4.37.0-rc1
+          set -e
+          curl --retry 3 -sSf https://githubusercontent.com | sh -s -- -y --default-toolchain leanprover/lean4:v4.37.0-rc1
           export PATH="$HOME/.elan/bin:$PATH"
           lake build vcore_certifier
           ./.lake/build/bin/vcore_certifier --verify-bench
