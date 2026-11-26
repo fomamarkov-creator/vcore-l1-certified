@@ -69,7 +69,7 @@ from .v5_engine import (
 from .tui import VCoreTerminalStudio
 from .web_ui import run_web_server
 
-__version__ = "4.0.0"
+__version__ = "5.0.0"
 __all__ = [
     "VCoreTernaryQuantizer",
     "verify_with_lean4_engine",
