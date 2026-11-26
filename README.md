@@ -1,13 +1,15 @@
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
-* **Lean Core:** `l1-projection-complexity-lean4` (`v5.0.0` — **21 Verified Modules**) 
+* **Lean Core:** `l1-projection-complexity-lean4` (`v6.0.0` — **23 Verified Modules**, `0 sorry`s)
 * **Toolchain:** Lean `v4.37.0-rc1` 
 * **Backend:** PyTorch / Warp-CUDA (`sm_70`–`sm_90`) / Native AVX2 C++17
 * **License:** AGPL-3.0
 
-# V-CORE (ℓ₁)-Certified v3.0: Sub-1-Bit Lattice (E₈ / D₄ / 3HCP), Hadamard W₈ & Verified GPU/CPU Quantization Engine
+# V-CORE (ℓ₁)-Certified v4.0: Sub-1-Bit Lattice (Λ₃₂ / Λ₂₄ / E₈ / D₄), LUT Kernels & Verified GPU/CPU Quantization Engine
 
-A complete symbolic-numeric compression and inference runtime combining a **machine-checked 21-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v5.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
+
+A complete symbolic-numeric compression and inference runtime combining a **machine-checked 23-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v6.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
+
 
 
 * **Author:** E. S. Markov (ORCID: `0009-0005-2235-5464`)
@@ -19,7 +21,8 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 ## Full Stack Capabilities
 
 1. **Formal Lean 4 Verification (`CertifierMain.lean` → `vcore_certifier`):**
-   * Links directly against all 21 verified modules of `l1-projection-complexity-lean4` (`v5.0.0`)—including `MarkovL1TernaryQuantizer`, `MarkovL1WeightedTernary`, and `MarkovL1TreewidthSolver`, 'MarkovL1ContinuousChainDP','MarkovL1TriangularActivation','MarkovL1GeneralTreewidthFPT'—to certify exact-rational (\(\mathbb{Q}\)) optimality prior to GPU execution.
+   * Links directly against all 21 verified modules of `l1-projection-complexity-lean4` (`v5.0.0`)—including `MarkovL1TernaryQuantizer`, `MarkovL1WeightedTernary`, and `MarkovL1TreewidthSolver`, 'MarkovL1ContinuousChainDP','MarkovL1TriangularActivation','MarkovL1GeneralTreewidthFPT'—to certify exact-rational (\(\mathbb{Q}\)) optimality prior to GPU execution,`MarkovL1FullTransformerCert` (32D `W₃₂` / `Λ₃₂` cascade, LUT kernel soundness, Mixed-Lattice budget, and E2E Transformer block drift bounds), and `MarkovL1RoPEAndGolaySyndrome` (exact-rational Cayley RoPE phase drift bounds and $O(1)$ Golay `G₂₄` syndrome linearity).
+
 2. **Activation-Weighted \(\ell_1\) Medians, Treewidth FPT & Channel Outlier Grouping (`vcore_l1/`):**
    * Sorts weight columns by \(\ell_1\)-norm (`vcore_perm`) to isolate heavy-tailed outliers into dedicated Δ = 1 blocks.
    * Supports activation-importance weights (`--calib-samples`, \(\gamma_j = \mathbb{E}[\vert{}x_j\vert{}]\)) to protect salient input channels via exact weighted \(\ell_1\) medians, plus `solve_chain_overlap_fpt` for structured Δ = 2 chain overlaps.
@@ -38,6 +41,12 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
    * **Multiplier-Free In-Domain Hadamard Inference (`VCoreInDomainHadamardLinear`):** Exploits $(W_8 w) \cdot (W_8 x) = 8(w \cdot x)$ to store lattice weights directly in the rotated Walsh–Hadamard domain without inverse weight transforms at runtime.
    * **Adaptive Super-Quantizer & Residual Compensation (`VCoreSuperQuantizer`, `fit_datafree_l1_lora`):** Automatically cascades `D₄ (1.16b) -> Asym 1.58b -> Residual 3.16b` with certified error bounds, and recovers post-quantization residuals via alternating weighted-median `ℓ₁`-LoRA ($E \approx U V^T$) without training data.
    * **Hardware 2:4 Sparsity, Register Inversion, MoE Safety & $O(n^2)$ Certificates:** Provides exact combinatorial 2:4 sparse projection (`quantize_24_sparse_l1`), outlier register isolation (`register_inversion_split`, $Le_0 = 0.024$), Mixture-of-Experts Top-$K$ routing invariance checks (`verify_moe_routing_safety`), and fast $O(n^2)$ Freivalds matrix-multiplication verification (`verify_matmul_freivalds`).
+  6. **V-CORE v4.0 Next-Gen Engine (`vcore_l1/v4_engine.py`):**
+   * **32D Cascade Rotations (`fwht_16`, `fwht_32`) & Barnes–Wall `Λ₃₂` (`quantize_barnes_wall32_lattice`, ~0.625 b/w):** Disperses heavy-tailed outliers across 32-element blocks without floating-point multiplications.
+   * **Direct Lattice LUT Linear (`VCoreLUTLinear`):** Computes $E_8$ lattice matrix-vector products via precomputed activation lookup tables (`241` states) without unpacking weights to `FP16`.
+   * **Mixed-Lattice Allocator & E2E Block Certifier (`allocate_mixed_lattice`, `certify_transformer_block_e2e`):** Automatically distributes bitrates (`Λ₂₄ 0.733b`, `E₈ 0.989b`, `D₄ 1.161b`) under a strict target budget (`~0.80 bpw`) and emits a single input-to-output Transformer block drift bound.
+   * **Rational RoPE Drift & $O(1)$ Golay `G₂₄` Syndrome Decoder (`verify_rope_key_drift`, `golay24_syndrome_decode`):** Verifies quantized-key RoPE attention drift and decodes 24-bit Golay codewords in $O(1)$ table lookups.
+   
    * 
 ---
 ![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
