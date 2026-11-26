@@ -225,8 +225,9 @@ def integer_only_cayley_rope(
     s_fixed = torch.round(((2.0 * t_val) / (1.0 + t2)) * scale).to(torch.int64)
 
     while c_fixed.ndim < q.ndim:
-        c_fixed = c_fixed.unsqueeze(1)
-        s_fixed = s_fixed.unsqueeze(1)
+        c_fixed = c_fixed.unsqueeze(0)
+        s_fixed = s_fixed.unsqueeze(0)
+
 
     def _rot(vec: torch.Tensor) -> torch.Tensor:
         vf = torch.round(vec.to(torch.float32) * scale).to(torch.int64)
