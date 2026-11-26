@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "vcore_tokenizer.hpp"
+#include "vcore_bundle_mmap.hpp"
 
 extern "C" void vcore_cpu_fused_gemm(const uint8_t* W_packed,
                                      const float* block_scales,
@@ -195,6 +196,15 @@ public:
         for (const auto& f : files) {
             if (!load_file(f)) return false;
         }
+        return true;
+    }
+    bool load_from_memory(const uint8_t* ptr, size_t fsize) {
+        if (fsize < 8) return false;
+        uint64_t header_len = 0;
+        memcpy(&header_len, ptr, 8);
+        if (8 + header_len > fsize) return false;
+        std::string hdr((const char*)(ptr + 8), (size_t)header_len);
+        parse_header(hdr, ptr + 8 + header_len);
         return true;
     }
 
@@ -532,17 +542,47 @@ int main(int argc, char** argv) {
     }
 
     auto t_load0 = std::chrono::high_resolution_clock::now();
-    ModelConfig cfg = load_config(model_dir);
+    ModelConfig cfg;
     VCoreBPETokenizer tokenizer;
-    bool has_tok = tokenizer.load(model_dir);
-    if (has_tok && !prompt_text.empty()) {
-        prompt_ids = tokenizer.encode_chat_prompt(prompt_text);
-    }
-
+    bool has_tok = false;
     SafetensorsLoader st;
-    if (!st.load_dir(model_dir)) {
-        std::cerr << "[ERROR] Не удалось загрузить .safetensors из: " << model_dir << "\n";
-        return 1;
+
+    VCoreBundleMmap bundle_mmap;
+    bool is_bundle = VCoreBundleMmap::is_vcore_bundle(model_dir);
+    if (is_bundle) {
+        if (!bundle_mmap.open_bundle(model_dir)) {
+            std::cerr << "[ERROR] Не удалось открыть бандл .vcore: " << model_dir << "\n";
+            return 1;
+        }
+        std::string cfg_json = bundle_mmap.read_text_entry("config.json");
+        if (!cfg_json.empty()) {
+            cfg.hidden_size = parse_json_int(cfg_json, "hidden_size", cfg.hidden_size);
+            cfg.intermediate_size = parse_json_int(cfg_json, "intermediate_size", cfg.intermediate_size);
+            cfg.num_hidden_layers = parse_json_int(cfg_json, "num_hidden_layers", cfg.num_hidden_layers);
+            cfg.num_attention_heads = parse_json_int(cfg_json, "num_attention_heads", cfg.num_attention_heads);
+            cfg.num_key_value_heads = parse_json_int(cfg_json, "num_key_value_heads", cfg.num_attention_heads);
+            cfg.vocab_size = parse_json_int(cfg_json, "vocab_size", cfg.vocab_size);
+            cfg.rms_norm_eps = parse_json_float(cfg_json, "rms_norm_eps", cfg.rms_norm_eps);
+            cfg.rope_theta = parse_json_float(cfg_json, "rope_theta", cfg.rope_theta);
+        }
+        for (const auto& kv : bundle_mmap.entries) {
+            if (kv.first.size() > 12 && kv.first.substr(kv.first.size() - 12) == ".safetensors") {
+                st.load_from_memory(kv.second.ptr, kv.second.size);
+            }
+        }
+        if (!bundle_mmap.cert_summary.empty()) {
+            std::cout << "[Lean 4 Passport] Max Block Drift <= " << bundle_mmap.cert_summary << "\n";
+        }
+    } else {
+        cfg = load_config(model_dir);
+        has_tok = tokenizer.load(model_dir);
+        if (has_tok && !prompt_text.empty()) {
+            prompt_ids = tokenizer.encode_chat_prompt(prompt_text);
+        }
+        if (!st.load_dir(model_dir)) {
+            std::cerr << "[ERROR] Не удалось загрузить .safetensors из: " << model_dir << "\n";
+            return 1;
+        }
     }
 
     std::vector<float> embed_tokens = st.tensors.count("model.embed_tokens.weight.vcore_sph_idx")
