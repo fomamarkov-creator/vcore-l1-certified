@@ -332,7 +332,7 @@ class VCoreLinear(nn.Module):
             layer.bias.copy_(bias.to(torch.float16))
         return layer
 
-def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_shape = x.shape
         x_2d = x.reshape(-1, self.in_features)
         if self.vcore_perm is not None:
