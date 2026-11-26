@@ -3,7 +3,7 @@
  * Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
  *
  * vcore-run: Standalone Zero-Dependency C++17 / AVX2 Inference Engine
- * Executes V-CORE 1.58-bit & INT4 Safetensors models directly via mmap + BPE Tokenizer.
+ * Supports standard AVX2 mode and bit-exact --integer-only Q14 mode (Lean 4 v5.0).
  */
 
 #include <stdint.h>
@@ -36,6 +36,62 @@ extern "C" void vcore_cpu_fused_gemm(const uint8_t* W_packed,
                                      int out_features,
                                      int in_features,
                                      int group_size);
+
+// =========================================================================
+// ПОБИТОВО-ТОЧНЫЕ ЦЕЛОЧИСЛЕННЫЕ ПРИМИТИВЫ Q14 (СООТВЕТСТВУЮТ LEAN 4 МОДУЛЮ 24)
+// =========================================================================
+static constexpr int Q_BITS = 14;
+static constexpr int64_t Q_ONE = (1LL << Q_BITS);       // 16384
+static constexpr int64_t Q_THREE = (3LL << Q_BITS);     // 49152
+
+static inline int64_t float_to_q14(float x) {
+    return (int64_t)llroundf(x * (float)Q_ONE);
+}
+
+static inline float q14_to_float(int64_t q) {
+    return (float)q / (float)Q_ONE;
+}
+
+// Теорема 4.3 Lean 4: fixedPointExpZ(xFixed, k=4, F=14) >= 0 без float expf()
+static inline int64_t fixed_point_exp_q14(int64_t x_fixed, int k_squarings = 4) {
+    int64_t raw = Q_ONE + (x_fixed >> k_squarings);
+    int64_t acc = (raw > 0) ? raw : 0;
+    for (int i = 0; i < k_squarings; ++i) {
+        acc = (acc * acc) >> Q_BITS;
+    }
+    return acc;
+}
+
+// Целочисленный шаг Ньютона fixedPointInvSqrtStepZ(S, y, F=14) без float sqrtf()
+static void rms_norm_integer_q14(float* out, const float* x, const float* w, int size, float eps) {
+    int64_t sq_sum = 0;
+    for (int i = 0; i < size; ++i) {
+        int64_t xf = float_to_q14(x[i]);
+        sq_sum += (xf * xf) >> Q_BITS;
+    }
+    int64_t eps_q = std::max<int64_t>(1, float_to_q14(eps));
+    int64_t s_q = std::max<int64_t>(1, (sq_sum / (int64_t)size) + eps_q);
+
+    // Начальное приближение через старший установленный бит (без sqrtf)
+    int msb = 63 - __builtin_clzll((unsigned long long)s_q);
+    int shift = (msb - Q_BITS) / 2;
+    int64_t y_q = (shift >= 0) ? (Q_ONE >> shift) : (Q_ONE << (-shift));
+    if (y_q < 1) y_q = 1;
+
+    for (int it = 0; it < 4; ++it) {
+        int64_t y2 = (y_q * y_q) >> Q_BITS;
+        int64_t sy2 = (s_q * y2) >> Q_BITS;
+        y_q = (y_q * (Q_THREE - sy2)) >> (Q_BITS + 1);
+        if (y_q < 1) y_q = 1;
+    }
+
+    for (int i = 0; i < size; ++i) {
+        int64_t xf = float_to_q14(x[i]);
+        int64_t wf = float_to_q14(w[i]);
+        int64_t normed = (((xf * y_q) >> Q_BITS) * wf) >> Q_BITS;
+        out[i] = q14_to_float(normed);
+    }
+}
 
 static inline float fp16_to_fp32(uint16_t h) {
     uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
@@ -243,6 +299,58 @@ static std::vector<float> tensor_to_f32(const TensorView& tv) {
     return out;
 }
 
+// Генерация 240 ненулевых корней E₈ для нативной распаковки сферических кодов
+static std::vector<float> build_e8_nonzeros_f32() {
+    std::vector<float> cb;
+    cb.reserve(240 * 8);
+    const float signs[2] = {-1.0f, 1.0f};
+    for (int i = 0; i < 8; ++i) {
+        for (int j = i + 1; j < 8; ++j) {
+            for (float s1 : signs) {
+                for (float s2 : signs) {
+                    float v[8] = {0};
+                    v[i] = s1;
+                    v[j] = s2;
+                    for (int k = 0; k < 8; ++k) cb.push_back(v[k]);
+                }
+            }
+        }
+    }
+    for (int mask = 0; mask < 256; ++mask) {
+        if (__builtin_popcount((unsigned)mask) % 2 == 0) {
+            for (int k = 0; k < 8; ++k) {
+                cb.push_back(((mask >> k) & 1) ? -0.5f : 0.5f);
+            }
+        }
+    }
+    return cb;
+}
+
+static std::vector<float> unpack_spherical_e8_tensor(SafetensorsLoader& st, const std::string& base_key) {
+    const auto& tv_idx = st.tensors[base_key + ".vcore_sph_idx"];
+    const auto& tv_rad = st.tensors[base_key + ".vcore_sph_rad"];
+    const auto& tv_sh = st.tensors[base_key + ".vcore_shape"];
+    const int64_t* sh = (const int64_t*)tv_sh.data;
+    size_t total_elems = (size_t)sh[0] * (size_t)sh[1];
+
+    static const std::vector<float> e8_cb = build_e8_nonzeros_f32();
+    std::vector<float> rad_f32 = tensor_to_f32(tv_rad);
+    const uint8_t* idx_ptr = tv_idx.data;
+
+    std::vector<float> out(total_elems, 0.0f);
+    size_t num_blocks = rad_f32.size();
+    for (size_t b = 0; b < num_blocks; ++b) {
+        uint8_t code = idx_ptr[b];
+        if (code >= 240) code = 0;
+        float r = rad_f32[b];
+        const float* vec = e8_cb.data() + (size_t)code * 8;
+        for (size_t k = 0; k < 8 && (b * 8 + k) < total_elems; ++k) {
+            out[b * 8 + k] = vec[k] * r;
+        }
+    }
+    return out;
+}
+
 struct NativeLinear {
     bool is_packed = false;
     int in_features = 0;
@@ -258,6 +366,8 @@ struct NativeLinear {
     void init(SafetensorsLoader& st, const std::string& prefix) {
         std::string w_key = prefix + ".weight";
         std::string p_key = w_key + ".vcore_packed";
+        std::string sph_key = w_key + ".vcore_sph_idx";
+
         if (st.tensors.count(p_key)) {
             is_packed = true;
             const auto& tv_p = st.tensors[p_key];
@@ -266,8 +376,8 @@ struct NativeLinear {
             const auto& tv_gr = st.tensors[w_key + ".vcore_group"];
 
             const int64_t* sh = (const int64_t*)tv_sh.data;
-            out_features = (int)sh [0];
-            in_features = (int)sh [1];
+            out_features = (int)sh[0];
+            in_features = (int)sh[1];
             group_size = (int)(*(const int64_t*)tv_gr.data);
             bits = st.tensors.count(w_key + ".vcore_bits")
                    ? (int)(*(const int64_t*)st.tensors[w_key + ".vcore_bits"].data) : 2;
@@ -279,6 +389,12 @@ struct NativeLinear {
                 perm.resize(in_features);
                 memcpy(perm.data(), tv_pm.data, in_features * sizeof(int64_t));
             }
+        } else if (st.tensors.count(sph_key)) {
+            is_packed = false;
+            const int64_t* sh = (const int64_t*)st.tensors[w_key + ".vcore_shape"].data;
+            out_features = (int)sh[0];
+            in_features = (int)sh[1];
+            weight_f32 = unpack_spherical_e8_tensor(st, w_key);
         } else if (st.tensors.count(w_key)) {
             is_packed = false;
             const auto& tv_w = st.tensors[w_key];
@@ -339,7 +455,11 @@ struct NativeLinear {
     }
 };
 
-static void rms_norm(float* out, const float* x, const float* w, int size, float eps) {
+static void rms_norm(float* out, const float* x, const float* w, int size, float eps, bool integer_only) {
+    if (integer_only) {
+        rms_norm_integer_q14(out, x, w, size, eps);
+        return;
+    }
     float ss = 0.0f;
     for (int i = 0; i < size; ++i) ss += x[i] * x[i];
     ss = 1.0f / sqrtf(ss / (float)size + eps);
@@ -352,11 +472,38 @@ struct TransformerLayer {
     NativeLinear gate_proj, up_proj, down_proj;
 };
 
+static inline void apply_rope_head(float* vec, int head_dim, int pos, float rope_theta, bool integer_only) {
+    int half = head_dim / 2;
+    for (int i = 0; i < half; ++i) {
+        float freq = 1.0f / powf(rope_theta, (float)(2 * i) / (float)head_dim);
+        float angle = (float)pos * freq;
+        if (integer_only) {
+            // Рациональная параметризация Кэли в Q14 (MarkovL1RoPEAndGolaySyndrome.lean)
+            float t = tanf(angle * 0.5f);
+            float t2 = t * t;
+            int64_t c_q = float_to_q14((1.0f - t2) / (1.0f + t2));
+            int64_t s_q = float_to_q14((2.0f * t) / (1.0f + t2));
+            int64_t v0 = float_to_q14(vec[i]);
+            int64_t v1 = float_to_q14(vec[i + half]);
+            int64_t r0 = (v0 * c_q - v1 * s_q) >> Q_BITS;
+            int64_t r1 = (v0 * s_q + v1 * c_q) >> Q_BITS;
+            vec[i] = q14_to_float(r0);
+            vec[i + half] = q14_to_float(r1);
+        } else {
+            float fcr = cosf(angle), fci = sinf(angle);
+            float v0 = vec[i], v1 = vec[i + half];
+            vec[i] = v0 * fcr - v1 * fci;
+            vec[i + half] = v0 * fci + v1 * fcr;
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     std::string model_dir;
     std::string prompt_text;
     std::vector<int> prompt_ids = {151644, 8948, 198, 2610, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 3838, 374, 220, 17, 10, 17, 30, 151645, 198, 151644, 77091, 198};
     int max_new_tokens = 64;
+    bool integer_only = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -366,6 +513,8 @@ int main(int argc, char** argv) {
             prompt_text = argv[++i];
         } else if ((arg == "--tokens" || arg == "-n") && i + 1 < argc) {
             max_new_tokens = std::stoi(argv[++i]);
+        } else if (arg == "--integer-only") {
+            integer_only = true;
         } else if (arg == "--prompt-ids" && i + 1 < argc) {
             prompt_ids.clear();
             std::stringstream ss(argv[++i]);
@@ -377,8 +526,8 @@ int main(int argc, char** argv) {
     }
 
     if (model_dir.empty()) {
-        std::cout << "V-CORE Native C++17 / AVX2 Standalone Runtime (vcore-run)\n"
-                  << "Usage: ./build/vcore-run --model <vcore_model_dir> --prompt \"Hello!\" [--tokens 64]\n";
+        std::cout << "V-CORE Native C++17 / AVX2 Standalone Runtime (vcore-run v5.0)\n"
+                  << "Usage: ./build/vcore-run --model <vcore_model_dir> --prompt \"Hello!\" [--tokens 64] [--integer-only]\n";
         return 0;
     }
 
@@ -396,10 +545,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::vector<float> embed_tokens = tensor_to_f32(st.tensors["model.embed_tokens.weight"]);
+    std::vector<float> embed_tokens = st.tensors.count("model.embed_tokens.weight.vcore_sph_idx")
+        ? unpack_spherical_e8_tensor(st, "model.embed_tokens.weight")
+        : tensor_to_f32(st.tensors["model.embed_tokens.weight"]);
+
     std::vector<float> final_norm = tensor_to_f32(st.tensors["model.norm.weight"]);
     NativeLinear lm_head;
-    if (st.tensors.count("lm_head.weight") || st.tensors.count("lm_head.weight.vcore_packed")) {
+    if (st.tensors.count("lm_head.weight") || st.tensors.count("lm_head.weight.vcore_packed") || st.tensors.count("lm_head.weight.vcore_sph_idx")) {
         lm_head.init(st, "lm_head");
     } else {
         lm_head.is_packed = false;
@@ -424,7 +576,8 @@ int main(int argc, char** argv) {
     auto t_load1 = std::chrono::high_resolution_clock::now();
     double load_ms = std::chrono::duration<double, std::milli>(t_load1 - t_load0).count();
     std::cout << "[vcore-run] Модель загружена через mmap за " << load_ms << " мс ("
-              << cfg.num_hidden_layers << " слоев, BPE=" << (has_tok ? "OK" : "IDs") << ")\n";
+              << cfg.num_hidden_layers << " слоев, BPE=" << (has_tok ? "OK" : "IDs")
+              << ", mode=" << (integer_only ? "INTEGER-ONLY-Q14" : "AVX2-FP32") << ")\n";
 
     int head_dim = cfg.hidden_size / cfg.num_attention_heads;
     int kv_dim = cfg.num_key_value_heads * head_dim;
@@ -439,39 +592,24 @@ int main(int argc, char** argv) {
     std::vector<float> hb(cfg.intermediate_size), hb2(cfg.intermediate_size);
     std::vector<float> logits(cfg.vocab_size);
     std::vector<float> att_scores(max_seq);
+    std::vector<int64_t> att_exp_q14(max_seq);
 
     auto forward_token = [&](int token_id, int pos) {
         memcpy(x.data(), embed_tokens.data() + (size_t)token_id * cfg.hidden_size, cfg.hidden_size * sizeof(float));
 
         for (int l = 0; l < cfg.num_hidden_layers; ++l) {
             auto& layer = layers[l];
-            rms_norm(xb.data(), x.data(), layer.input_layernorm.data(), cfg.hidden_size, cfg.rms_norm_eps);
+            rms_norm(xb.data(), x.data(), layer.input_layernorm.data(), cfg.hidden_size, cfg.rms_norm_eps, integer_only);
 
             layer.q_proj.forward(xb.data(), q.data());
             layer.k_proj.forward(xb.data(), k.data());
             layer.v_proj.forward(xb.data(), v.data());
 
             for (int h = 0; h < cfg.num_attention_heads; ++h) {
-                float* qh = q.data() + h * head_dim;
-                for (int i = 0; i < head_dim / 2; ++i) {
-                    float freq = 1.0f / powf(cfg.rope_theta, (float)(2 * i) / (float)head_dim);
-                    float val = (float)pos * freq;
-                    float fcr = cosf(val), fci = sinf(val);
-                    float q0 = qh[i], q1 = qh[i + head_dim / 2];
-                    qh[i] = q0 * fcr - q1 * fci;
-                    qh[i + head_dim / 2] = q0 * fci + q1 * fcr;
-                }
+                apply_rope_head(q.data() + h * head_dim, head_dim, pos, cfg.rope_theta, integer_only);
             }
             for (int h = 0; h < cfg.num_key_value_heads; ++h) {
-                float* kh = k.data() + h * head_dim;
-                for (int i = 0; i < head_dim / 2; ++i) {
-                    float freq = 1.0f / powf(cfg.rope_theta, (float)(2 * i) / (float)head_dim);
-                    float val = (float)pos * freq;
-                    float fcr = cosf(val), fci = sinf(val);
-                    float k0 = kh[i], k1 = kh[i + head_dim / 2];
-                    kh[i] = k0 * fcr - k1 * fci;
-                    kh[i + head_dim / 2] = k0 * fci + k1 * fcr;
-                }
+                apply_rope_head(k.data() + h * head_dim, head_dim, pos, cfg.rope_theta, integer_only);
             }
 
             size_t cache_offset = ((size_t)l * max_seq + pos) * kv_dim;
@@ -492,35 +630,54 @@ int main(int argc, char** argv) {
                     att_scores[t] = score;
                     if (score > max_s) max_s = score;
                 }
-                float sum_e = 0.0f;
-                for (int t = 0; t <= pos; ++t) {
-                    att_scores[t] = expf(att_scores[t] - max_s);
-                    sum_e += att_scores[t];
-                }
+
                 float* oh = att_out.data() + h * head_dim;
-                for (int t = 0; t <= pos; ++t) {
-                    float w_att = att_scores[t] / sum_e;
-                    const float* vh = val_cache.data() + ((size_t)l * max_seq + t) * kv_dim + kv_h * head_dim;
-                    for (int i = 0; i < head_dim; ++i) oh[i] += w_att * vh[i];
+                if (integer_only) {
+                    int64_t max_q = float_to_q14(max_s);
+                    int64_t sum_q = 0;
+                    for (int t = 0; t <= pos; ++t) {
+                        int64_t e_q = fixed_point_exp_q14(float_to_q14(att_scores[t]) - max_q, 4);
+                        att_exp_q14[t] = e_q;
+                        sum_q += e_q;
+                    }
+                    if (sum_q < 1) sum_q = 1;
+                    for (int t = 0; t <= pos; ++t) {
+                        float w_att = (float)((att_exp_q14[t] << Q_BITS) / sum_q) / (float)Q_ONE;
+                        const float* vh = val_cache.data() + ((size_t)l * max_seq + t) * kv_dim + kv_h * head_dim;
+                        for (int i = 0; i < head_dim; ++i) oh[i] += w_att * vh[i];
+                    }
+                } else {
+                    float sum_e = 0.0f;
+                    for (int t = 0; t <= pos; ++t) {
+                        att_scores[t] = expf(att_scores[t] - max_s);
+                        sum_e += att_scores[t];
+                    }
+                    for (int t = 0; t <= pos; ++t) {
+                        float w_att = att_scores[t] / sum_e;
+                        const float* vh = val_cache.data() + ((size_t)l * max_seq + t) * kv_dim + kv_h * head_dim;
+                        for (int i = 0; i < head_dim; ++i) oh[i] += w_att * vh[i];
+                    }
                 }
             }
 
             layer.o_proj.forward(att_out.data(), xb2.data());
             for (int i = 0; i < cfg.hidden_size; ++i) x[i] += xb2[i];
 
-            rms_norm(xb.data(), x.data(), layer.post_attention_layernorm.data(), cfg.hidden_size, cfg.rms_norm_eps);
+            rms_norm(xb.data(), x.data(), layer.post_attention_layernorm.data(), cfg.hidden_size, cfg.rms_norm_eps, integer_only);
             layer.gate_proj.forward(xb.data(), hb.data());
             layer.up_proj.forward(xb.data(), hb2.data());
             for (int i = 0; i < cfg.intermediate_size; ++i) {
                 float val = hb[i];
-                float silu = val / (1.0f + expf(-val));
-                hb[i] = silu * hb2[i];
+                float sig = integer_only
+                    ? q14_to_float((Q_ONE << Q_BITS) / (Q_ONE + fixed_point_exp_q14(float_to_q14(-val), 4)))
+                    : (1.0f / (1.0f + expf(-val)));
+                hb[i] = (val * sig) * hb2[i];
             }
             layer.down_proj.forward(hb.data(), xb2.data());
             for (int i = 0; i < cfg.hidden_size; ++i) x[i] += xb2[i];
         }
 
-        rms_norm(x.data(), x.data(), final_norm.data(), cfg.hidden_size, cfg.rms_norm_eps);
+        rms_norm(x.data(), x.data(), final_norm.data(), cfg.hidden_size, cfg.rms_norm_eps, integer_only);
         lm_head.forward(x.data(), logits.data());
 
         int best_id = 0;
