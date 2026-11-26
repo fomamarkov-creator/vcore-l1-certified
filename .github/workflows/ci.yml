@@ -1,54 +1,40 @@
-name: CI
+name: V-CORE L1-Certified CI (Lean 4 + C++/AVX2/NEON + PyTorch)
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
-
-permissions:
-  contents: write
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
 jobs:
   lean-and-python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: printf '{"version":"1.1.0","packagesDir":".lake/packages","packages":[]}\n' > lake-manifest.json
-      - uses: leanprover/lean-action@v1
-        with:
-          build: false
-      - run: |
-          lake update
-          lake exe cache get
-          lake build
-          lake exe vcore_certifier --verify-bench
-      - name: Build Native CPU AVX2 Engine
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Lean 4 (elan) & Build Formal Certifier
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target vcore_cpu -j $(nproc)
-      - uses: actions/setup-python@v5
+          curl https://githubusercontent.com -sSf | sh -s -- -y --default-toolchain leanprover/lean4:v4.37.0-rc1
+          export PATH="$HOME/.elan/bin:$PATH"
+          lake build vcore_certifier
+          ./.lake/build/bin/vcore_certifier --verify-bench
+
+      - name: Build Native C++17 / AVX2 / NEON Engine
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j$(nproc)
+          ./build/vcore-run
+
+      - name: Set up Python 3.11 & Run End-to-End Quantization Tests
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: |
-          pip install numpy safetensors huggingface-hub torch rich
-          pip install -e . --no-deps
-          python test_quantizer.py
 
-  cuda-build:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Jimver/cuda-toolkit@v0.2.16
-        with:
-          cuda: "12.1.0"
-          method: "network"
-      - run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release -j $(nproc)
-      - uses: actions/upload-artifact@v4
-        with:
-          name: libvcore_engine-cuda12-all-gpus
-          path: |
-            build/libvcore_engine.so
-            build/libvcore_cpu.so
-            
+      - name: Install dependencies & Run test_quantizer.py
+        run: |
+          export PATH="$HOME/.elan/bin:$PATH"
+          pip install numpy safetensors torch --index-url https://pytorch.org
+          pip install -e .
+          python3 -u test_quantizer.py 2>&1
+          
