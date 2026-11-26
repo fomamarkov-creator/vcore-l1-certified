@@ -14,7 +14,7 @@ from .safetensors_quantizer import (
 
 def main():
     parser = argparse.ArgumentParser(
-        description="V-CORE L1-Certified: Activation-Weighted & Triangular-Compensated 1.58-bit & INT4 Cascade Packer"
+        description="V-CORE L1-Certified: Activation-Weighted, Cross-Layer & Spherical Quantizer"
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--input", "-i", help="Локальный файл .safetensors или папка модели")
@@ -25,8 +25,10 @@ def main():
     parser.add_argument("--theta", type=float, default=1e-4, help="Базовый порог шума Фильтра Маркова")
     parser.add_argument("--max-rel-error", type=float, default=0.40, help="Порог относительной L1-ошибки")
     parser.add_argument("--target-vram-gb", type=float, default=None, help="Целевой бюджет видеопамяти в ГБ")
-    parser.add_argument("--calib-samples", type=int, default=0, help="Число примеров для сбора активаций и треугольного фактора R (0 = Data-Free)")
-    parser.add_argument("--triangular-feedback", action="store_true", help="Включить экспериментальную треугольную компенсацию корреляций Холецкого при калибровке")
+    parser.add_argument("--calib-samples", type=int, default=0, help="Число примеров для сбора активаций и фактора Холецкого R (0 = Data-Free)")
+    parser.add_argument("--triangular-feedback", action="store_true", help="Включить треугольную компенсацию корреляций Холецкого при калибровке")
+    parser.add_argument("--no-cross-layer", action="store_true", help="Отключить межслойную компенсацию кривизны (v_proj->o_proj, up_proj->down_proj)")
+    parser.add_argument("--spherical-emb", action="store_true", help="Сжать embed_tokens и lm_head гиперболическими сферическими кодами E₈ (~1.0 b/w)")
     parser.add_argument("--export-gguf", default=None, help="Сразу экспортировать сжатую модель в .gguf (для llama.cpp / Ollama)")
     parser.add_argument("--token", default=None, help="Токен Hugging Face")
 
@@ -45,6 +47,8 @@ def main():
             collect_covariance=use_cov,
         )
 
+    cross_layer = not args.no_cross_layer
+
     if args.hf_repo:
         stats = repack_hf_hub_model(
             repo_id=args.hf_repo,
@@ -56,6 +60,8 @@ def main():
             target_vram_gb=args.target_vram_gb,
             activation_map=act_map,
             chol_map=chol_map,
+            cross_layer_comp=cross_layer,
+            spherical_emb=args.spherical_emb,
         )
     elif os.path.isdir(args.input):
         stats = repack_sharded_model(
@@ -67,6 +73,8 @@ def main():
             target_vram_gb=args.target_vram_gb,
             activation_map=act_map,
             chol_map=chol_map,
+            cross_layer_comp=cross_layer,
+            spherical_emb=args.spherical_emb,
         )
     else:
         stats = repack_safetensors_layerwise(
@@ -78,6 +86,8 @@ def main():
             target_vram_gb=args.target_vram_gb,
             activation_map=act_map,
             chol_map=chol_map,
+            cross_layer_comp=cross_layer,
+            spherical_emb=args.spherical_emb,
         )
 
     print("=== V-CORE L1-CERTIFIED COMPRESSION REPORT ===")
@@ -100,4 +110,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+            
