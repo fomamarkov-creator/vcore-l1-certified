@@ -371,7 +371,7 @@ def repack_safetensors_layerwise(
                 return (1, k)
             return (2, k)
 
-        ordered_items = sorted(state_dict.items(), key=lambda kv: _layer_sort_key(kv))
+        ordered_items = sorted(state_dict.items(), key=lambda kv: _layer_sort_key(kv[0]))
         total_tensors = len(ordered_items)
 
         for idx, (name, tensor) in enumerate(ordered_items, 1):
