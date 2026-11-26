@@ -96,9 +96,10 @@ def run_ab_benchmark(hidden_size: int = 2048, out_size: int = 2048, steps: int =
 
     # 3. V-CORE L1-Certified 1.58-bit (Markov Median + Fused Packed)
     q_vcore = VCoreTernaryQuantizer(group_size=32, theta=1e-4, auto_theta=True)
-    w_vcore, _, scales_vcore = q_vcore.quantize(w)
+    w_vcore, mask_vcore, scales_vcore = q_vcore.quantize(w)
     err_vcore = float((torch.sum(torch.abs(w - w_vcore)) / torch.sum(torch.abs(w))).item())
-    packed_u8, _ = pack_ternary_to_uint8(w_vcore.cpu(), group_size=32)
+    packed_u8, _ = pack_ternary_to_uint8(mask_vcore.cpu())
+
 
     def run_vcore_158():
         return torch.nn.functional.linear(x, w_vcore)
