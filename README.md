@@ -1,4 +1,5 @@
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![DOI](https://zenodo.org)](https://doi.org/10.5281/zenodo.24527692)
 
 * **Lean Core:** `l1-projection-complexity-lean4` (`v6.0.0` — **23 Verified Modules**, `0 sorry`s)
 * **Toolchain:** Lean `v4.37.0-rc1` 
@@ -212,3 +213,17 @@ vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_vcore --max-re
   ./build/vcore-run --model ./qwen15_vcore --prompt "Explain L1 median quantization." --tokens 64
   ```
   
+## Citation
+
+If you use **V-CORE (ℓ₁)-Certified** or the **Lean 4 ℓ₁-Projection Complexity** formal verification library in your research or software, please cite:
+
+```bibtex
+@misc{markov2026vcore,
+  author       = {Markov, Efim Sergeevich},
+  title        = {V-CORE (\(\ell_1\))-Certified: Formally Verified Sub-1-Bit Lattice Quantization and \(\ell_1\) Metric Projection Complexity in Lean 4},
+  year         = {2026},
+  publisher    = {Zenodo},
+  doi          = {10.5281/zenodo.24527692},
+  url          = {https://doi.org/10.5281/zenodo.24527692}
+}
+```
