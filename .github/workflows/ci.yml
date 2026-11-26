@@ -41,7 +41,7 @@ jobs:
 
       - name: Install dependencies & Run test_quantizer.py
         run: |
-          pip install numpy safetensors huggingface-hub torch rich
+          pip install numpy safetensors huggingface-hub transformers torch rich
           pip install -e . --no-deps
           python3 -u test_quantizer.py 2>&1
 
