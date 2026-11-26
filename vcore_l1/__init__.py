@@ -7,6 +7,15 @@ from .treewidth_solver import (
 )
 from .calibration import collect_activation_importance
 from .gguf_exporter import export_vcore_to_gguf
+from .hardware_probe import HardwareProfile, probe_hardware
+from .backend_dispatcher import VCoreBackendDispatcher, get_dispatcher
+from .vcore_bundle import (
+    build_lean4_certificate_passport,
+    export_vcore_bundle,
+    read_vcore_bundle_manifest,
+    unpack_vcore_bundle_to_temp,
+)
+from .vlm_support import repack_vlm_model, VCoreModelForVision2Seq
 from .inference_layer import (
     VCoreLinear,
     VCoreSphericalEmbedding,
@@ -77,7 +86,7 @@ from .v5_engine import (
 from .tui import VCoreTerminalStudio
 from .web_ui import run_web_server
 
-__version__ = "5.1.0"
+__version__ = "5.0.0"
 __all__ = [
     "VCoreTernaryQuantizer",
     "verify_with_lean4_engine",
@@ -87,6 +96,16 @@ __all__ = [
     "solve_triple_overlap_fpt",
     "collect_activation_importance",
     "export_vcore_to_gguf",
+    "HardwareProfile",
+    "probe_hardware",
+    "VCoreBackendDispatcher",
+    "get_dispatcher",
+    "build_lean4_certificate_passport",
+    "export_vcore_bundle",
+    "read_vcore_bundle_manifest",
+    "unpack_vcore_bundle_to_temp",
+    "repack_vlm_model",
+    "VCoreModelForVision2Seq",
     "VCoreLinear",
     "VCoreSphericalEmbedding",
     "VCoreSphericalLinear",
