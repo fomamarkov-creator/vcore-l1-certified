@@ -3,6 +3,8 @@
 
 import argparse
 import os
+from .vcore_bundle import export_vcore_bundle
+from .vlm_support import repack_vlm_model
 from .calibration import collect_activation_importance
 from .gguf_exporter import export_vcore_to_gguf
 from .safetensors_quantizer import (
@@ -31,7 +33,9 @@ def main():
     parser.add_argument("--spherical-emb", action="store_true", help="Сжать embed_tokens и lm_head гиперболическими сферическими кодами E₈ (~1.0 b/w)")
     parser.add_argument("--export-gguf", default=None, help="Сразу экспортировать сжатую модель в .gguf (для llama.cpp / Ollama)")
     parser.add_argument("--token", default=None, help="Токен Hugging Face")
-
+    parser.add_argument("--vlm", action="store_true", help="Режим мультимодальной модели (Qwen-VL / LLaVA: visual в E₈ + LLM каскад)")
+    parser.add_argument("--bundle", default=None, help="Упаковать результат в единый файл .vcore с паспортом Lean 4")
+    
     args = parser.parse_args()
 
     act_map = None
