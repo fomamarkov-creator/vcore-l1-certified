@@ -197,6 +197,27 @@ def main():
     assert verify_matmul_freivalds(A_m, B_m, C_m)
     assert not verify_matmul_freivalds(A_m, B_m, C_m + 0.5)
 
+    from vcore_l1 import (
+        apply_cross_layer_compensation,
+        quantize_spherical_code,
+        dyadic_softmax,
+        integer_rmsnorm,
+    )
+    w1_f = torch.randn(32, 64)
+    w1_q, _, _ = q.quantize(w1_f)
+    w2_f = torch.randn(16, 32)
+    w2_c, drift_ratio = apply_cross_layer_compensation(w1_f, w1_q, w2_f, dampening=0.8)
+    assert w2_c.shape == w2_f.shape and drift_ratio <= 1.0
+
+    emb_q, max_chord = quantize_spherical_code(torch.randn(16, 64), lattice="e8")
+    assert emb_q.shape == (16, 64) and max_chord < 2.0
+
+    sm_dyadic = dyadic_softmax(torch.randn(4, 16), k_squarings=5)
+    assert torch.allclose(sm_dyadic.sum(dim=-1), torch.ones(4), atol=1e-4)
+
+    rms_int = integer_rmsnorm(torch.randn(4, 64), torch.ones(64), newton_iters=4)
+    assert rms_int.shape == (4, 64)
+    
     print(
         f"[OK] Все компоненты v4.0.0 (Lean 4 23-Module Core, E8/Λ32 Sub-1-Bit [{mix_sum['avg_bpw']:.2f} b/w], "
         f"LUT Kernel, Rational RoPE, Golay G24 Syndrome, ℓ₁-LoRA [{err_before:.1f} -> {err_after:.1f}]) работают!"
