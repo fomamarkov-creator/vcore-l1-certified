@@ -188,7 +188,7 @@ class VCoreDynamicCache:
         query_length = cache_position if isinstance(cache_position, int) else int(cache_position.shape)
         kv_length = self.get_seq_length(layer_idx) + query_length
         return kv_length, 0
-    class VCoreSphericalEmbedding(nn.Module):
+class VCoreSphericalEmbedding(nn.Module):
     """
     Сжатый слой nn.Embedding на гиперболических сферических кодах E₈:
     хранит словарь в формате (uint8 idx, fp16 radius) (~1.0 b/w) и распаковывает
