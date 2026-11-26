@@ -60,6 +60,12 @@ from .v4_engine import (
     verify_rope_key_drift,
     golay24_syndrome_decode,
 )
+from .v5_engine import (
+    apply_cross_layer_compensation,
+    quantize_spherical_code,
+    dyadic_softmax,
+    integer_rmsnorm,
+)
 from .tui import VCoreTerminalStudio
 from .web_ui import run_web_server
 
