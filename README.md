@@ -48,10 +48,11 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
    * **Mixed-Lattice Allocator & E2E Block Certifier (`allocate_mixed_lattice`, `certify_transformer_block_e2e`):** Automatically distributes bitrates (`Λ₂₄ 0.733b`, `E₈ 0.989b`, `D₄ 1.161b`) under a strict target budget (`~0.80 bpw`) and emits a single input-to-output Transformer block drift bound.
    * **Rational RoPE Drift & $O(1)$ Golay `G₂₄` Syndrome Decoder (`verify_rope_key_drift`, `golay24_syndrome_decode`):** Verifies quantized-key RoPE attention drift and decodes 24-bit Golay codewords in $O(1)$ table lookups.*
   -
-7. **V-CORE v5.0 Frontier Primitives (`vcore_l1/v5_engine.py`):**
-   - **Cross-Layer $\ell_1$ Curvature Compensation (`apply_cross_layer_compensation`):** Adjusts next-layer weights $W_2' = W_2 + \Delta W_2$ to cancel first-order quantization residuals from layer $l$ (`cross_layer_exact_cancellation`).
-   - **Rational Spherical Codes (`quantize_spherical_code`):** Projects embedding and KV-cache blocks onto constant-energy hyperspheres ($\|c\|_2^2 = R^2$ on $D_4$/$E_8$ shells) with certified cosine lower bounds.
-   - **Integer-Only / Float-Free Transformer Primitives (`dyadic_softmax`, `integer_rmsnorm`):** Evaluates Softmax via dyadic shift-and-square approximation $(1 + x / 2^k)^{2^k}$ and RMSNorm via quadratically convergent Newton steps (`invSqrtNewtonStepQ_residual_identity`).
+7. **V-CORE v5.0 Frontier Primitives (Fully Integrated in `vcore-pack`, `inference_layer` & `vcore-run`):**
+   * **Cross-Layer $\ell_1$ / KL Curvature Compensation (`apply_cross_layer_compensation`):** Automatically enabled in `vcore-pack` (disable via `--no-cross-layer`); propagates quantization residuals from `v_proj` → `o_proj` and `up_proj` → `down_proj` to cancel cascade drift (`cross_layer_exact_cancellation`, `weighted_kl_logit_drift_bound`).
+   * **Hyperbolic Poincaré & Spherical Codes (`--spherical-emb`, `VCoreSphericalEmbedding`, `VCoreSphericalLinear`):** Compresses `embed_tokens`, `lm_head`, and `VCoreDynamicCache(mode="spherical")` onto constant-energy $E_8$ shells (`1.0 b/w` `uint8` indices + `float16` Poincaré radii, `radial_angular_poincare_bound`) with on-the-fly token lookup.
+   * **Bit-Exact Integer-Only Transformer (`integer_only=True`, `vcore-run --integer-only`):** Evaluates Softmax (`fixedPointExpZ`), RMSNorm (`fixedPointInvSqrtStepZ`), and Cayley RoPE (`rationalCayleyCS`) in pure `int64` fixed-point `Q14`/`Q20` shift registers without floating-point `exp`, `sqrt`, `sin`, or `cos`.
+
    - 
 ---
 ![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
@@ -168,6 +169,8 @@ vcore-pack --hf-repo Qwen/Qwen2.5-1.5B --output ./qwen25_vcore_aw --calib-sample
 # Compress a local sharded model folder
 vcore-pack --input ./hf_model_dir --output ./model_vcore --group-size 64 --max-rel-error 0.40
 ```
+# Compress weights + Cross-Layer compensation + Hyperbolic E8 Spherical Embeddings/LM-Head
+vcore-pack --hf-repo Qwen/Qwen2.5-1.5B --output ./qwen25_vcore_sph --spherical-emb --target-vram-gb 4.0
 
 ### 3. Run Inference & 2-Bit KV-Cache in PyTorch / Transformers
 ```python
@@ -178,12 +181,16 @@ print(verify_with_lean4_engine())
 
 # 2. Load compressed model in one line
 model = VCoreModelForCausalLM.from_vcore_pretrained("./qwen25_vcore", device="cuda")
+# Load with Integer-Only Q14 RMSNorm & Spherical E8 Embeddings, plus Spherical KV-Cache
+model = VCoreModelForCausalLM.from_vcore_pretrained("./qwen25_vcore_sph", device="cuda", integer_only=True)
+kv_cache = VCoreDynamicCache(group_size=32, mode="spherical")
 
 # 3. Generate with 2-bit compressed KV-cache
 kv_cache = VCoreDynamicCache(group_size=32)
 outputs = model.generate(**inputs, past_key_values=kv_cache, max_new_tokens=128)
 
 > **Practical Tip for 2-Bit KV-Cache (`VCoreDynamicCache`):** On compact GQA models (`0.5B`–`1.5B`) with very few KV heads, combining quantized weights with 2-bit KV-cache compression can accumulate key-quantization drift on repetitive long contexts. For sub-2B models, use a finer group size (`VCoreDynamicCache(group_size=16)`) or keep standard FP16 KV-cache; reserve `group_size=32` 2-bit KV compression for `7B+` models where wider attention heads preserve context stability.
+
 
 ```
 
@@ -198,7 +205,7 @@ Convert any V-CORE compressed model directory directly into a `.gguf` file (`TQ2
 ```bash
 # Export an existing V-CORE compressed model directory to GGUF
 vcore-export-gguf --input ./qwen25_vcore --output ./qwen25_vcore.gguf
-
+```
 # Or compress from Hugging Face Hub and export to GGUF in a single command
 vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_vcore --max-rel-error 0.22 --export-gguf ./qwen15_vcore.gguf
 ```
@@ -212,11 +219,11 @@ vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_vcore --max-re
   ```bash
   vcore-web --model ./qwen15_vcore --port 8080
   ```
-* **Zero-Dependency Native C++17 / AVX2 Binary (`vcore-run`, no Python/PyTorch required):**
-  ```bash
-  ./build/vcore-run --model ./qwen15_vcore --prompt "Explain L1 median quantization." --tokens 64
-  ```
-  
+# Zero-Dependency Native C++17 / AVX2 Binary in bit-exact Integer-Only Q14 mode
+```
+./build/vcore-run --model ./qwen15_vcore --prompt "Explain L1 median quantization." --tokens 64 --integer-only
+```
+
 ## Citation
 
 If you use **V-CORE (ℓ₁)-Certified** or the **Lean 4 ℓ₁-Projection Complexity** formal verification library in your research or software, please cite:
