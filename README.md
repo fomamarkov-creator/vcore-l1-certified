@@ -1,7 +1,7 @@
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 [![DOI](https://zenodo.org)](https://doi.org/10.5281/zenodo.24527692)
 
-* **Lean Core:** `l1-projection-complexity-lean4` (`v7.0.0` — **24 Verified Modules**, `0 sorry`s)
+* **Lean Core:** `l1-projection-complexity-lean4` (`v7.0.0` — **25 Verified Modules**, `0 sorry`s)
 * **Toolchain:** Lean `v4.37.0-rc1` 
 * **Backend:** PyTorch / Warp-CUDA (`sm_70`–`sm_90`) / Native AVX2 C++17
 * **License:** AGPL-3.0
@@ -9,7 +9,7 @@
 # V-CORE (ℓ₁)-Certified v4.0: Sub-1-Bit Lattice (Λ₃₂ / Λ₂₄ / E₈ / D₄), LUT Kernels & Verified GPU/CPU Quantization Engine
 
 
-A complete symbolic-numeric compression and inference runtime combining a **machine-checked 23-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v7.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
+A complete symbolic-numeric compression and inference runtime combining a **machine-checked 25-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v7.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
 
 
 
@@ -54,6 +54,13 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
    * **Bit-Exact Integer-Only Transformer (`integer_only=True`, `vcore-run --integer-only`):** Evaluates Softmax (`fixedPointExpZ`), RMSNorm (`fixedPointInvSqrtStepZ`), and Cayley RoPE (`rationalCayleyCS`) in pure `int64` fixed-point `Q14`/`Q20` shift registers without floating-point `exp`, `sqrt`, `sin`, or `cos`.
 
    - 
+8. **Full-Stack Ecosystem, Hardware Auto-Dispatch & QAT Pretraining:**
+   * **One-Click Pull & Auto-Hardware Dispatch (`vcore-pull`):** Automatically probes NVIDIA CUDA, Apple MPS, AMD/Intel GPUs, and CPU SIMD (`AVX-512` / `AVX2` / `ARM NEON`), selects the optimal memory budget, packs into a single `.vcore` file, and launches chat.
+   * **Single-File `.vcore` Bundle & Lean 4 Passport:** 64-byte aligned single-file container embedding the model weights, auto-generated `README.md` model card, and a formal Lean 4 drift certificate (`certified_max_block_drift` + Freivalds hash).
+   * **OpenAI-Compatible Server (`vcore-serve`):** Drop-in local `/v1/chat/completions` (with SSE streaming) and `/v1/models` endpoint for VS Code (Continue/Cline), Open WebUI, and AI agents.
+   * **Self-Speculative $E_8$ Decoding & Infinite Streaming Cache (`VCoreSpeculativeGenerator`, `VCoreStreamingCache`):** Drafts tokens with a `0.989 b/w` $E_8$ twin and verifies in parallel for exact distribution match, paired with a fixed-memory Attention-Sink + Sliding-Window KV cache.
+   * **Vision-Language Models (`--vlm`) & QAT Training (`vcore-train`):** Compresses `visual.*` encoders onto $E_8$ spheres while keeping `1.58-bit` LLM cascades, and supports pretraining from scratch or `QAT-LoRA` fine-tuning (`MarkovL1QATConvergence.lean`, 25 modules).
+* 
 ---
 ![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
 
@@ -222,6 +229,26 @@ vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_vcore --max-re
 # Zero-Dependency Native C++17 / AVX2 Binary in bit-exact Integer-Only Q14 mode
 ```
 ./build/vcore-run --model ./qwen15_vcore --prompt "Explain L1 median quantization." --tokens 64 --integer-only
+```
+### 7. One-Click Download, Hardware Auto-Pack & Chat (`vcore-pull`)
+```bash
+# Automatically detects your GPU/CPU/VRAM, packs into a single .vcore bundle, and starts chat
+vcore-pull Qwen/Qwen2.5-1.5B --chat
+```
+
+### 8. OpenAI-Compatible Local API Server (`vcore-serve`)
+```bash
+# Connect VS Code, Open WebUI, or any OpenAI SDK client to http://127.0.0
+vcore-serve --model ./qwen2.5-1.5b.vcore --port 8000
+```
+
+### 9. Multimodal VLM Compression & QAT Training from Scratch (`--vlm`, `vcore-train`)
+```bash
+# Pack Vision-Language model (Visual encoder in E8 + LLM in 1.58-bit) into a single .vcore file
+vcore-pack --input ./Qwen2.5-VL-3B --output ./qwen_vl_vcore --vlm --bundle ./qwen_vl.vcore
+
+# Train from scratch or fine-tune with QAT-LoRA directly over 1.58-bit / E8 lattices
+vcore-train --model Qwen/Qwen2.5-1.5B --data ./train.jsonl --output ./qwen_qat --mode e8 --epochs 2
 ```
 
 ## Citation
