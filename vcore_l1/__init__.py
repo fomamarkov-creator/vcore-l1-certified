@@ -16,6 +16,12 @@ from .vcore_bundle import (
     unpack_vcore_bundle_to_temp,
 )
 from .vlm_support import repack_vlm_model, VCoreModelForVision2Seq
+from .qat_trainer import (
+    VCoreQATLinear,
+    VCoreQATLoRALinear,
+    convert_model_to_qat,
+    train_vcore_step,
+)
 from .inference_layer import (
     VCoreLinear,
     VCoreSphericalEmbedding,
@@ -106,6 +112,10 @@ __all__ = [
     "unpack_vcore_bundle_to_temp",
     "repack_vlm_model",
     "VCoreModelForVision2Seq",
+    "VCoreQATLinear",
+    "VCoreQATLoRALinear",
+    "convert_model_to_qat",
+    "train_vcore_step",
     "VCoreLinear",
     "VCoreSphericalEmbedding",
     "VCoreSphericalLinear",
