@@ -59,14 +59,15 @@ def build_lean4_certificate_passport(
     eps_kv = 0.008 if kv_bits >= 4 else 0.018
     eps_emb = 0.012 if spherical_emb else 0.0
     e2e_block_bound = certify_transformer_block_e2e(
-        eps_w=eps_w,
-        eps_k=eps_kv,
-        eps_v=eps_kv,
-        eps_attn=0.005,
-        eps_mlp=eps_w,
-        eps_norm=0.002 + eps_emb * 0.1,
-        lip_const=1.5,
+        eps_w,
+        eps_kv,
+        eps_kv,
+        0.005,
+        eps_w,
+        0.002 + eps_emb * 0.1,
+        1.5,
     )
+
 
     return {
         "certificate_standard": "Lean4-MarkovL1-v5.0 (24-Modules, 0-sorry)",
