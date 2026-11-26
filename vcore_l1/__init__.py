@@ -9,6 +9,9 @@ from .calibration import collect_activation_importance
 from .gguf_exporter import export_vcore_to_gguf
 from .inference_layer import (
     VCoreLinear,
+    VCoreSphericalEmbedding,
+    VCoreSphericalLinear,
+    VCoreIntegerRMSNorm,
     VCoreKVCacheQuantizer,
     VCoreDynamicCache,
     VCoreModelForCausalLM,
@@ -62,14 +65,19 @@ from .v4_engine import (
 )
 from .v5_engine import (
     apply_cross_layer_compensation,
+    pack_spherical_code,
+    unpack_spherical_code,
     quantize_spherical_code,
+    integer_only_softmax,
+    integer_only_rmsnorm,
+    integer_only_cayley_rope,
     dyadic_softmax,
     integer_rmsnorm,
 )
 from .tui import VCoreTerminalStudio
 from .web_ui import run_web_server
 
-__version__ = "5.0.0"
+__version__ = "5.1.0"
 __all__ = [
     "VCoreTernaryQuantizer",
     "verify_with_lean4_engine",
@@ -80,6 +88,9 @@ __all__ = [
     "collect_activation_importance",
     "export_vcore_to_gguf",
     "VCoreLinear",
+    "VCoreSphericalEmbedding",
+    "VCoreSphericalLinear",
+    "VCoreIntegerRMSNorm",
     "VCoreKVCacheQuantizer",
     "VCoreDynamicCache",
     "VCoreModelForCausalLM",
@@ -124,6 +135,15 @@ __all__ = [
     "fit_datafree_l1_lora",
     "verify_moe_routing_safety",
     "verify_matmul_freivalds",
+    "apply_cross_layer_compensation",
+    "pack_spherical_code",
+    "unpack_spherical_code",
+    "quantize_spherical_code",
+    "integer_only_softmax",
+    "integer_only_rmsnorm",
+    "integer_only_cayley_rope",
+    "dyadic_softmax",
+    "integer_rmsnorm",
     "VCoreTerminalStudio",
     "run_web_server",
 ]
