@@ -137,7 +137,8 @@ def quantize_spherical_code(
 # 3. ПОБИТОВО-ТОЧНЫЕ ЦЕЛОЧИСЛЕННЫЕ ПРИМИТИВЫ (INTEGER-ONLY Q.F НА INT64)
 # =========================================================================
 
-def integer_only_softmax(logits: torch.Tensor, k_squarings: int = 4, frac_bits: int = 14) -> torch.Tensor:
+def integer_only_softmax(logits: torch.Tensor, k_squarings: int = 5, frac_bits: int = 20) -> torch.Tensor:
+
     """
     Побитово-точная реализация `fixedPointExpZ` (MarkovL1CrossLayerAndIntegerTransformer.lean)
     в целочисленных регистрах `torch.int64` со сдвигами `>> frac_bits` (без float exp).
