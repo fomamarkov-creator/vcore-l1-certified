@@ -19,6 +19,7 @@ import MarkovL1ZeroKnowledgeInferenceCert
 import MarkovL1HCPAndBirkhoffQuantizer
 import MarkovL1FullTransformerCert
 import MarkovL1RoPEAndGolaySyndrome
+import MarkovL1CrossLayerAndIntegerTransformer
 
 open MarkovL1Solver
 open MarkovL1WeightedSolver
@@ -88,6 +89,10 @@ def main (args : List String) : IO Unit := do
       let cw := MarkovL1RoPEAndGolaySyndrome.encodeGolay24 1337
       let err : UInt32 := (1 : UInt32) <<< 5
       IO.println s!"[V-CORE v4.0 Rational RoPE & Golay G₂₄] unit={cRope*cRope + sRope*sRope} | syn_inv={MarkovL1RoPEAndGolaySyndrome.syndromeGolay24 (cw ^^^ err) == MarkovL1RoPEAndGolaySyndrome.syndromeGolay24 err}"
+      
+      let w2Comp := MarkovL1CrossLayerAndIntegerTransformer.crossLayerCompensatedWeightQ (3/4) (1/2) (2/1)
+      let y1 := MarkovL1CrossLayerAndIntegerTransformer.invSqrtNewtonStepQ (4/1) (1/2)
+      IO.println s!"[V-CORE v5.0 Frontier Module 24] crossLayer_w2'={w2Comp} | integer_invSqrt4={y1}"
 
   | _ =>
       IO.println "V-CORE Certified Lean 4 Bridge (linked to l1-projection-complexity-lean4 v6.0.0 — 23 Modules)"
