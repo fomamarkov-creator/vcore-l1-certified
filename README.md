@@ -61,6 +61,9 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
    * **Self-Speculative $E_8$ Decoding & Infinite Streaming Cache (`VCoreSpeculativeGenerator`, `VCoreStreamingCache`):** Drafts tokens with a `0.989 b/w` $E_8$ twin and verifies in parallel for exact distribution match, paired with a fixed-memory Attention-Sink + Sliding-Window KV cache.
    * **Vision-Language Models (`--vlm`) & QAT Training (`vcore-train`):** Compresses `visual.*` encoders onto $E_8$ spheres while keeping `1.58-bit` LLM cascades, and supports pretraining from scratch or `QAT-LoRA` fine-tuning (`MarkovL1QATConvergence.lean`, 25 modules).
 * 
+   * **Zero-Copy `.vcore` Bundle `mmap` Loader (`vcore_bundle_mmap.hpp`):** Opens 64-byte aligned single-file `.vcore` bundles directly in C++ address space with zero disk extraction and prints the embedded Lean 4 drift certificate on startup.
+   * 
+
 ---
 ![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
 
@@ -265,3 +268,6 @@ If you use **V-CORE (ℓ₁)-Certified** or the **Lean 4 ℓ₁-Projection Compl
   url          = {https://doi.org/10.5281/zenodo.24527692}
 }
 ```
+# Zero-Copy mmap execution of a single-file .vcore bundle directly in native C++17 / AVX2 (with Lean 4 Passport check)
+
+./build/vcore-run --model ./qwen2.5-1.5b.vcore --prompt "Explain L1 median quantization." --tokens 64 --integer-only
