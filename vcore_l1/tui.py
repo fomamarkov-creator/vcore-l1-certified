@@ -158,7 +158,7 @@ class VCoreTerminalStudio:
 
         load_target = model_dir
         self.certificate_info = None
-                if os.path.isfile(model_dir) and model_dir.endswith(".gguf"):
+        if os.path.isfile(model_dir) and model_dir.endswith(".gguf"):
             print(f"[V-CORE] Обнаружен GGUF-файл {model_dir} -> загрузка в режиме ЭМРТ-инспекции...")
             try:
                 from gguf import GGUFReader
