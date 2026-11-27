@@ -551,15 +551,15 @@ def repack_sharded_model(
         "total_l1_err": 0.0,
     }
     new_weight_map: Dict[str, str] = {}
-
- idx_path = os.path.join(input_dir, "model.safetensors.index.json")
- if spherical_emb and os.path.isfile(idx_path):
-     with open(idx_path, "r", encoding="utf-8") as f:
-         w_map = json.load(f).get("weight_map", {})
-     if "lm_head.weight" not in w_map:
-         spherical_emb = False
+    idx_path = os.path.join(input_dir, "model.safetensors.index.json")
+    if spherical_emb and os.path.isfile(idx_path):
+        with open(idx_path, "r", encoding="utf-8") as f:
+            w_map = json.load(f).get("weight_map", {})
+        if "lm_head.weight" not in w_map:
+            spherical_emb = False
 
     for shard_path in shard_files:
+
         fname = os.path.basename(shard_path)
         out_shard = os.path.join(output_dir, fname)
         st = repack_safetensors_layerwise(
