@@ -373,7 +373,6 @@ def _quantize_layer_adaptive(
         w_hat = _restore_quantized_tensor(grid, scales, chosen_g, tuple(w_f32.shape), perm=perm)
         return packed, scales.to(torch.float16), perm, chosen_g, used_bits, orig_l1, float(err), w_hat
 
-
 def repack_safetensors_layerwise(
     input_path: str,
     output_path: str,
@@ -387,6 +386,7 @@ def repack_safetensors_layerwise(
     cross_layer_comp: bool = True,
     spherical_emb: bool = False,
     use_tomography: bool = False,
+    progress_callback: Optional[Any] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     work_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -413,7 +413,27 @@ def repack_safetensors_layerwise(
 
     quant_cache: Dict[str, torch.Tensor] = {}
 
+    def _notify(idx: int, total: int, l_name: str, tensor_obj: torch.Tensor, mode: str, rel_err: float = 0.0):
+        if progress_callback is not None:
+            t_info = tomogram.get(l_name, {})
+            try:
+                progress_callback({
+                    "index": idx,
+                    "total": total,
+                    "name": l_name,
+                    "shape": list(tensor_obj.shape),
+                    "mode": mode,
+                    "rel_error": round(float(rel_err), 4),
+                    "impedance": round(float(t_info.get("mean_impedance", 1.0)), 2),
+                    "peak_ratio": round(float(t_info.get("in_peak_ratio", 1.0)), 2),
+                    "hadamard_gain": round(float(t_info.get("hadamard_gain", 1.0)), 2),
+                    "progress": round(idx / max(total, 1), 4),
+                })
+            except Exception:
+                pass
+
     keys = list(state_dict.keys())
+    total_keys = len(keys)
     for idx, name in enumerate(keys, 1):
         tensor = state_dict[name]
         orig_bytes = tensor.numel() * tensor.element_size()
@@ -422,6 +442,7 @@ def repack_safetensors_layerwise(
         if not tensor.is_floating_point():
             out_tensors[name] = tensor
             total_packed_bytes += orig_bytes
+            _notify(idx, total_keys, name, tensor, "RAW_INT", 0.0)
             continue
 
         if "embed_tokens" in name or "lm_head" in name:
@@ -441,11 +462,13 @@ def repack_safetensors_layerwise(
                 total_packed_bytes += packed_b
                 spherical_layers += 1
                 del w_f32
+                _notify(idx, total_keys, name, tensor, "E8_SPHERICAL", 0.05)
             else:
                 out_tensors[name] = tensor.cpu()
                 total_packed_bytes += orig_bytes
                 rolled_back_layers += 1
-            print(f"\r[V-CORE {work_device.upper()}] [{idx}/{len(keys)}] {name:<45}", end="", flush=True)
+                _notify(idx, total_keys, name, tensor, "FP16_PROTECTED", 0.0)
+            print(f"\r[V-CORE {work_device.upper()}] [{idx}/{total_keys}] {name:<45}", end="", flush=True)
             continue
 
         layer_max_err = max_rel_error
@@ -460,7 +483,8 @@ def repack_safetensors_layerwise(
             out_tensors[name] = tensor.cpu()
             total_packed_bytes += orig_bytes
             rolled_back_layers += 1
-            print(f"\r[V-CORE {work_device.upper()}] [{idx}/{len(keys)}] {name:<45}", end="", flush=True)
+            _notify(idx, total_keys, name, tensor, "FP16_1D", 0.0)
+            print(f"\r[V-CORE {work_device.upper()}] [{idx}/{total_keys}] {name:<45}", end="", flush=True)
             continue
 
         w_f32 = tensor.to(device=work_device, dtype=torch.float32)
@@ -517,14 +541,19 @@ def repack_safetensors_layerwise(
         total_packed_bytes += packed_b
         if used_bits == 2:
             q158_layers += 1
+            mode_tag = "TERNARY_158BIT"
         else:
             q4_layers += 1
+            mode_tag = "INT4_BLOCK"
+
+        rel_e = l1_err / max(l1_orig, 1e-8)
+        _notify(idx, total_keys, name, tensor, mode_tag, rel_e)
 
         del w_f32, w_hat, packed, scales
         if work_device == "cuda":
             torch.cuda.empty_cache()
 
-        print(f"\r[V-CORE {work_device.upper()}] [{idx}/{len(keys)}] {name:<45}", end="", flush=True)
+        print(f"\r[V-CORE {work_device.upper()}] [{idx}/{total_keys}] {name:<45}", end="", flush=True)
 
     print()
     quant_cache.clear()
@@ -557,6 +586,7 @@ def repack_sharded_model(
     cross_layer_comp: bool = True,
     spherical_emb: bool = False,
     use_tomography: bool = False,
+    progress_callback: Optional[Any] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
@@ -592,9 +622,17 @@ def repack_sharded_model(
         if "lm_head.weight" not in w_map:
             spherical_emb = False
 
-    for shard_path in shard_files:
+    total_shards = len(shard_files)
+    for s_idx, shard_path in enumerate(shard_files):
         base_name = os.path.basename(shard_path)
         out_shard = os.path.join(output_dir, base_name)
+
+        def _shard_cb(evt: Dict[str, Any]):
+            if progress_callback is not None:
+                evt_copy = dict(evt)
+                evt_copy["progress"] = round((s_idx + evt.get("progress", 0.0)) / max(total_shards, 1), 4)
+                progress_callback(evt_copy)
+
         st = repack_safetensors_layerwise(
             shard_path,
             out_shard,
@@ -608,6 +646,7 @@ def repack_sharded_model(
             cross_layer_comp=cross_layer_comp,
             spherical_emb=spherical_emb,
             use_tomography=use_tomography,
+            progress_callback=_shard_cb if progress_callback else None,
         )
         for k in (
             "quantized_158bit_layers",
@@ -653,6 +692,7 @@ def repack_hf_hub_model(
     cross_layer_comp: bool = True,
     spherical_emb: bool = False,
     use_tomography: bool = False,
+    progress_callback: Optional[Any] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     from huggingface_hub import HfApi, hf_hub_download
@@ -678,6 +718,7 @@ def repack_hf_hub_model(
         "total_l1_err": 0.0,
     }
     new_weight_map: Dict[str, str] = {}
+    total_shards = len(shard_names)
 
     with tempfile.TemporaryDirectory() as tmp_dl:
         for fname in repo_files:
@@ -688,11 +729,18 @@ def repack_hf_hub_model(
                 if fname != "model.safetensors.index.json":
                     shutil.copy2(local_cfg, os.path.join(output_dir, fname))
 
-        for s_name in shard_names:
+        for s_idx, s_name in enumerate(shard_names):
             local_shard = hf_hub_download(
                 repo_id=repo_id, filename=s_name, local_dir=tmp_dl, revision=revision, token=token
             )
             out_shard = os.path.join(output_dir, os.path.basename(s_name))
+
+            def _hub_cb(evt: Dict[str, Any]):
+                if progress_callback is not None:
+                    evt_copy = dict(evt)
+                    evt_copy["progress"] = round((s_idx + evt.get("progress", 0.0)) / max(total_shards, 1), 4)
+                    progress_callback(evt_copy)
+
             st = repack_safetensors_layerwise(
                 local_shard,
                 out_shard,
@@ -706,6 +754,7 @@ def repack_hf_hub_model(
                 cross_layer_comp=cross_layer_comp,
                 spherical_emb=spherical_emb,
                 use_tomography=use_tomography,
+                progress_callback=_hub_cb if progress_callback else None,
             )
             for k in (
                 "quantized_158bit_layers",
@@ -739,3 +788,6 @@ def repack_hf_hub_model(
 
     agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
     return agg
+
+
+
