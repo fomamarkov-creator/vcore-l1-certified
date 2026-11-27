@@ -383,7 +383,11 @@ def repack_safetensors_layerwise(
                 continue
 
             if "embed_tokens" in name or "lm_head" in name:
-                if spherical_emb and tensor.ndim == 2 and tensor.numel() >= 64:
+                has_separate_lm_head = "lm_head.weight" in state_dict
+                is_large_hidden = (tensor.ndim == 2 and tensor.size(1) >= 3072)
+                use_sph_here = spherical_emb and has_separate_lm_head and is_large_hidden
+
+                if use_sph_here and tensor.ndim == 2 and tensor.numel() >= 64:
                     w_f32 = tensor.to(device=work_device, dtype=torch.float32)
                     sp_idx, sp_rad, orig_shape, _ = pack_spherical_code(
                         w_f32, lattice="e8", hyperbolic_poincare=True
@@ -397,6 +401,7 @@ def repack_safetensors_layerwise(
                     out_tensors[name] = tensor.cpu()
                     rolled_back_layers += 1
                 continue
+
 
             if not include_aux_layers and tensor.ndim < 2:
                 out_tensors[name] = tensor.cpu()
