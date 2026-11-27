@@ -7,14 +7,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .cuda_quantizer import VCoreTernaryQuantizer
 from .inference_layer import VCoreLinear
-from .super_quantizer import fwht_8, quantize_e8_lattice
+from .super_quantizer import MARKOV_LAMBDA_LIMIT, MARKOV_LE0_GAP, fwht_8, quantize_e8_lattice
 
 
 class VCoreQATLinear(nn.Module):
     """
     Обучаемый линейный слой для тренировки с нуля (Pretraining) и QAT-дообучения
     напрямую в 1.58-bit (ℓ₁-медиана) или Sub-1-Bit решётке E₈ с вращением Адамара W₈.
-    Использует Straight-Through Estimator (STE) с проксимальным нерастяжением.
+    Использует Straight-Through Estimator (STE) с проксимальным нерастяжением
+    и беспараметрическим модулярным сбросом Z/256Z (Module 27: `qat_modular_reset_invariant`).
     """
 
     def __init__(
@@ -55,14 +56,28 @@ class VCoreQATLinear(nn.Module):
                 layer.bias.copy_(linear.bias)
         return layer
 
+    @torch.no_grad()
+    def apply_modular_plateau_reset(self) -> int:
+        """
+        Беспараметрический модулярный сброс застрявших теневых весов по кольцу Z/256Z
+        (Module 27, Теорема `qat_modular_reset_invariant`): переполненные ячейки |w| >= 256
+        инвертируются через остаток по модулю 256 с зазором Le₀ = 0.024.
+        """
+        abs_w = torch.abs(self.weight)
+        overflow = abs_w >= MARKOV_LAMBDA_LIMIT
+        count = int(overflow.sum().item())
+        if count > 0:
+            signs = torch.sign(self.weight)
+            wrapped = torch.remainder(abs_w, MARKOV_LAMBDA_LIMIT) * MARKOV_LE0_GAP
+            self.weight.copy_(torch.where(overflow, signs * wrapped, self.weight))
+        return count
+
     def _quantize_ste(self, w: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             if self.mode == "e8" and (self.in_features % 8 == 0):
                 w_q, _, _ = quantize_e8_lattice(w, use_hadamard=True)
             else:
                 w_q, _, _ = self.quantizer.quantize(w)
-        # Straight-Through Estimator: на forward идёт точный квантованный вес w_q,
-        # на backward градиент проходит напрямую в master-веса self.weight
         return w + (w_q - w).detach()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -115,11 +130,6 @@ def convert_model_to_qat(
     lora_rank: int = 0,
     skip_names: Iterable[str] = ("lm_head",),
 ) -> nn.Module:
-    """
-    Переводит любую PyTorch / HuggingFace модель в режим обучения V-CORE QAT:
-    - Если слой уже сжат в `VCoreLinear` и `lora_rank > 0` — вешает обучаемый `VCoreQATLoRALinear`;
-    - Если слой обычный `nn.Linear` — заменяет на `VCoreQATLinear` для обучения с нуля / QAT.
-    """
     skip_set = set(skip_names)
     for full_name, module in list(model.named_modules()):
         if any(s in full_name for s in skip_set):
@@ -143,7 +153,7 @@ def train_vcore_step(
     labels: torch.Tensor,
     l1_weight_decay: float = 1e-4,
 ) -> float:
-    """Выполняет один шаг обучения QAT / Pretraining с проксимальным ℓ₁-регуляризатором."""
+    """Выполняет один шаг обучения QAT / Pretraining с проксимальным ℓ₁-регуляризатором и модулярным сбросом."""
     model.train()
     optimizer.zero_grad(set_to_none=True)
     outputs = model(input_ids=input_ids, labels=labels)
@@ -161,4 +171,11 @@ def train_vcore_step(
     loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
+
+    with torch.no_grad():
+        for mod in model.modules():
+            if isinstance(mod, VCoreQATLinear):
+                mod.apply_modular_plateau_reset()
+
     return float(loss.item())
+            
