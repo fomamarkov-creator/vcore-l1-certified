@@ -169,6 +169,17 @@ Evaluated on real weights (`Qwen2.5-0.5B-Instruct`, `layers.0.mlp.gate_proj`) an
 * **Triangular Activation Correlation Feedback ($\ell_1$-GPTQ):** Reduces correlated-activation output $\ell_1$ distortion by **+33.8%** (`199,321.7 -> 131,981.5`).
 * **MoE Top-$K$ & $O(n^2)$ Freivalds Runtime Audit:** Verifies $1024 \times 1024$ matrix-multiplication integrity in **5.92 ms** on CPU.
 *
+### 8. V-CORE v6.0.0 (`27-Modules`, `V256 Upgrades`) on Live `Qwen2.5-1.5B-Instruct` (Tesla T4 GPU)
+
+Evaluated end-to-end on `Qwen/Qwen2.5-1.5B-Instruct` (`151,936` vocabulary logits, `.vcore` single-file bundle `1,163.25 MB`, `2.56×` compression):
+
+| Benchmark / Metric | Baseline / Reference | V-CORE v6.0.0 (`27-Modules`) | Improvement / Fidelity |
+| :--- | :---: | :---: | :---: |
+| **1.58-Bit Layer Output $\ell_1$ Distortion (`gate_proj`)** | `70,928.6` (BitNet `absmean`) | **`60,924.7`** | **-14.1% $\ell_1$ distortion** |
+| **Logit Cosine Similarity vs. Unquantized FP16 (`151,936` vocab)** | `1.0000` (FP16) | **`0.9755`** | **97.55% alignment** |
+| **End-to-End `.vcore` Generation Speed (Tesla T4)** | `3.5 tok/s` (un-cached) | **`20.2 – 23.7 tok/s`** | **6.8× speedup** |
+| **2:4 Structured Sparsity (`2048×2048`, `125/192` Lock Threshold)** | `0.5282` rel. $\ell_1$ err | **`0.5281`** (`9.9 ms`) | **Zero quality loss ($O(1)$ prune)** |
+| **Lean 4 Formal Passport** | `v5.0` (26 modules) | **`Lean4-MarkovL1-v8.0`** | **27 Modules, `0 sorry` (`Drift ≤ 0.0965`)** |
 
 ## Installation & Quick Start
 
