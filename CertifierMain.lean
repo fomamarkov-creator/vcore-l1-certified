@@ -20,6 +20,9 @@ import MarkovL1HCPAndBirkhoffQuantizer
 import MarkovL1FullTransformerCert
 import MarkovL1RoPEAndGolaySyndrome
 import MarkovL1CrossLayerAndIntegerTransformer
+import MarkovL1QATConvergence
+import MarkovL1DyadicVNodeReduction
+import MarkovL1V256Upgrades
 
 open MarkovL1Solver
 open MarkovL1WeightedSolver
@@ -72,7 +75,7 @@ def main (args : List String) : IO Unit := do
       let bjOrth := MarkovL1HCPAndBirkhoffQuantizer.checkBirkhoffL1OrthogonalQ [2/1, -2/1, 0/1, 0/1] [1/2, 1/2, 1/4, -1/4]
       IO.println s!"[V-CORE 3HCP (13-pt) & Birkhoff-James ℓ₁] Le0={MarkovL1HCPAndBirkhoffQuantizer.Le0_gap} | orth={bjOrth}"
 
-      -- Модули 22-23: W32/Λ32, LUT-инференс, Mixed-Lattice бюджет, E2E Transformer Cert, RoPE и синдром Голея
+      -- Модули 22-24: W32/Λ32, LUT-инференс, Mixed-Lattice бюджет, E2E Transformer Cert, RoPE и синдром Голея
       let plan : List MarkovL1FullTransformerCert.MixedLatticeLayerSpec := [
         { layerName := "attn.v_proj (D4)", bpw := 1161/1000, paramCount := 10/1, holderDriftBound := 1/100 },
         { layerName := "mlp.gate_proj (Leech Λ24)", bpw := 733/1000, paramCount := 50/1, holderDriftBound := 3/100 },
@@ -94,6 +97,10 @@ def main (args : List String) : IO Unit := do
       let y1 := MarkovL1CrossLayerAndIntegerTransformer.invSqrtNewtonStepQ (4/1) (1/2)
       IO.println s!"[V-CORE v5.0 Frontier Module 24] crossLayer_w2'={w2Comp} | integer_invSqrt4={y1}"
 
+      -- Модуль 27: 7 апгрейдов матрицы V256 (Электрический Замок, 3HCP-фильтр, порог 125/192, анизотропный MoE)
+      let cert27 := MarkovL1V256.buildVerifiedV256Certificate
+      IO.println s!"[V-CORE Module 27 V256 Upgrades] stamp={cert27.stamp} | Le0={MarkovL1V256.Le_0Q} | lockThresh={MarkovL1V256.lockPruneThresholdQ}"
+
   | _ =>
-      IO.println "V-CORE Certified Lean 4 Bridge (linked to l1-projection-complexity-lean4 v6.0.0 — 23 Modules)"
+      IO.println "V-CORE Certified Lean 4 Bridge (linked to l1-projection-complexity-lean4 v8.0.0 — 27 Modules)"
       IO.println "Usage: lake exe vcore_certifier --verify-bench"
