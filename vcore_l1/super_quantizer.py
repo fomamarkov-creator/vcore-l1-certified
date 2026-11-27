@@ -7,16 +7,37 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .cuda_quantizer import _weighted_median_1d
 
-# Фундаментальные рациональные инварианты Маркова (MarkovL1HCPAndBirkhoffQuantizer.lean)
+# Фундаментальные рациональные инварианты Маркова (MarkovL1HCPAndBirkhoffQuantizer & Module 27)
 MARKOV_LAMBDA_LIMIT = 256.0
 MARKOV_N_BASE = 250.0
-MARKOV_ZETA_RATIO = MARKOV_LAMBDA_LIMIT / MARKOV_N_BASE  # 1.024
-MARKOV_LE0_GAP = MARKOV_ZETA_RATIO - 1.0                 # 0.024 (3/125)
+MARKOV_ZETA_RATIO = MARKOV_LAMBDA_LIMIT / MARKOV_N_BASE   # 1.024 (128/125)
+MARKOV_LE0_GAP = MARKOV_ZETA_RATIO - 1.0                  # 0.024 (3/125)
+MARKOV_ZERO_INVERSION = MARKOV_LAMBDA_LIMIT * MARKOV_ZETA_RATIO  # 262.144 (32768/125)
+MARKOV_LOCK_THRESHOLD = (16.0 - 12.0) / (MARKOV_LAMBDA_LIMIT * MARKOV_LE0_GAP)  # 125/192 ≈ 0.65104167
 
 
 # =========================================================================
-# 1. ОРТОГОНАЛЬНЫЕ ПРЕОБРАЗОВАНИЯ УОЛША–АДАМАРА H₄ И W₈ (БЕЗ УМНОЖЕНИЙ)
+# 1. ИЗОТРОПНЫЙ ФИЛЬТР 3HCP И ПРЕОБРАЗОВАНИЯ УОЛША–АДАМАРА H₄ / W₈
 # =========================================================================
+
+@torch.no_grad()
+def hcp12_isotropic_smooth(x: torch.Tensor, alpha: float = 0.05) -> torch.Tensor:
+    """
+    12-точечный изотропный фильтр сглаживания координационной сферы 3HCP
+    (Module 27, Теорема `hcp12_activation_filter_isotropic`):
+    обладает нулевым первым моментом (без смещения активаций) и изотропным вторым моментом (= 4).
+    """
+    if alpha <= 0.0 or x.size(-1) < 12:
+        return x
+    orig_dtype = x.dtype
+    xf = x.to(torch.float32)
+    shifts = (-6, -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6)
+    acc = torch.zeros_like(xf)
+    for s in shifts:
+        acc = acc + torch.roll(xf, shifts=s, dims=-1)
+    laplacian = (acc / 12.0) - xf
+    return (xf + alpha * laplacian).to(orig_dtype)
+
 
 def fwht_4(x: torch.Tensor) -> torch.Tensor:
     """
@@ -63,9 +84,7 @@ def fwht_8(x: torch.Tensor) -> torch.Tensor:
         b0 - b4, b1 - b5, b2 - b6, b3 - b7,
     ], dim=1)
     return out.reshape(orig_shape)
-
-
-# =========================================================================
+    # =========================================================================
 # 2. СЛОВАРИ ВЕКТОРНЫХ РЕШЁТОК: 3HCP (13-pt), D₄ (25-pt), E₈ (241-pt) И GOLAY G₂₄
 # =========================================================================
 
@@ -155,7 +174,9 @@ def get_golay24_shells(device: torch.device) -> Tuple[torch.Tensor, torch.Tensor
             torch.tensor(cooctads, device=device, dtype=torch.long),
         )
     return _CACHE_GOLAY_SHELLS[device]
-    # =========================================================================
+
+
+# =========================================================================
 # 3. ТОЧНЫЙ L1-ПОИСК МАСШТАБА И ВЕКТОРНЫЕ КВАНТОВАТЕЛИ РЕШЁТОК (3HCP, D₄, E₈, Λ₂₄)
 # =========================================================================
 
@@ -174,19 +195,19 @@ def _exact_l1_lattice_search(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Точный поиск точки решётки z* ∈ cb и оптимального L1-масштаба α* > 0,
-    минимизирующих ||b - α * z||_1 (устраняет расхождение между спинорными ±0.5 и целыми ±1.0 корнями).
+    минимизирующих ||b - α * z||_1.
     """
     n, _ = blocks.shape
-    base_scales = _nonzero_block_median(torch.abs(blocks))  # (n, 1)
+    base_scales = _nonzero_block_median(torch.abs(blocks))
     best_idx = torch.zeros((n,), device=blocks.device, dtype=torch.uint8)
     best_scale = torch.zeros((n, 1), device=blocks.device, dtype=torch.float32)
     w_hat = torch.zeros_like(blocks)
 
-    cb_abs = torch.abs(cb)  # (M, d)
+    cb_abs = torch.abs(cb)
     for start in range(0, n, chunk_size):
         end = min(start + chunk_size, n)
-        b_chunk = blocks[start:end]      # (B, d)
-        s_base = base_scales[start:end]  # (B, 1)
+        b_chunk = blocks[start:end]
+        s_base = base_scales[start:end]
 
         min_err = torch.full((end - start,), float("inf"), device=blocks.device, dtype=torch.float32)
         chunk_idx = torch.zeros((end - start,), device=blocks.device, dtype=torch.long)
@@ -199,14 +220,13 @@ def _exact_l1_lattice_search(
             min_err = torch.where(imp, cur_err, min_err)
             chunk_idx = torch.where(imp, cur_idx, chunk_idx)
 
-        # Точное аналитическое уточнение масштаба α*(z*) = weighted_median(|b_i| / |z*_i|, weights=|z*_i|)
-        z_sel = cb[chunk_idx]            # (B, d)
-        z_abs = cb_abs[chunk_idx]        # (B, d)
+        z_sel = cb[chunk_idx]
+        z_abs = cb_abs[chunk_idx]
         active = z_abs > 1e-8
         safe_z = torch.where(active, z_abs, torch.ones_like(z_abs))
         ratios = torch.where(active, torch.abs(b_chunk) / safe_z, torch.zeros_like(b_chunk))
         weights = torch.where(active, z_abs, torch.zeros_like(z_abs))
-        alpha_opt = _weighted_median_1d(ratios, weights)  # (B, 1)
+        alpha_opt = _weighted_median_1d(ratios, weights)
 
         q_cand = z_sel * alpha_opt
         err_cand = torch.sum(torch.abs(b_chunk - q_cand), dim=1)
@@ -259,6 +279,7 @@ def quantize_d4_lattice(weights: torch.Tensor, chunk_size: int = 65536) -> Tuple
 def quantize_e8_lattice(
     weights: torch.Tensor,
     use_hadamard: bool = True,
+    smooth_3hcp: bool = False,
     chunk_size: int = 32768,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -266,7 +287,8 @@ def quantize_e8_lattice(
     Каждый индекс E₈ упаковывается ровно в 1 байт uint8 (8 весов -> 8 бит = 1.0 b/w).
     """
     orig_shape = weights.shape
-    flat = weights.reshape(-1).to(torch.float32)
+    w_in = hcp12_isotropic_smooth(weights, alpha=0.05) if smooth_3hcp else weights
+    flat = w_in.reshape(-1).to(torch.float32)
     pad = (8 - (flat.numel() % 8)) % 8
     if pad > 0:
         flat = torch.cat([flat, torch.zeros(pad, device=flat.device, dtype=flat.dtype)])
@@ -281,25 +303,22 @@ def quantize_e8_lattice(
     w_restored = fwht_8(q_rot) / 2.8284271247461903 if use_hadamard else q_rot
     w_hat = w_restored.reshape(-1)[: weights.numel()].reshape(orig_shape).to(weights.dtype)
     return w_hat, best_idx, scales
-
-
 def _eval_golay_shell(b_chunk: torch.Tensor, shell_pos: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Оценивает проекцию 24D блока на заданную оболочку кода Голея (октады 8 или кооктады 16)."""
-    gathered_abs = torch.abs(b_chunk)[:, shell_pos]           # (B, 759, k)
-    sel_idx = torch.argmax(gathered_abs.sum(dim=-1), dim=1)   # (B,)
-    sel_pos = shell_pos[sel_idx]                              # (B, k)
+    gathered_abs = torch.abs(b_chunk)[:, shell_pos]
+    sel_idx = torch.argmax(gathered_abs.sum(dim=-1), dim=1)
+    sel_pos = shell_pos[sel_idx]
 
-    vals = torch.gather(b_chunk, 1, sel_pos)                  # (B, k)
+    vals = torch.gather(b_chunk, 1, sel_pos)
     signs = torch.where(vals >= 0, torch.ones_like(vals), -torch.ones_like(vals))
 
-    # Чётность отрицательных знаков (isLeech24OctadShell)
     odd_mask = ((signs < 0).sum(dim=1) % 2) == 1
     if odd_mask.any():
         min_idx = torch.argmin(torch.abs(vals), dim=1)
         signs[odd_mask, min_idx[odd_mask]] *= -1.0
 
     signed_proj = vals * signs
-    alpha = _weighted_median_1d(torch.clamp(signed_proj, min=0.0), torch.ones_like(vals))  # (B, 1)
+    alpha = _weighted_median_1d(torch.clamp(signed_proj, min=0.0), torch.ones_like(vals))
 
     cand_block = torch.zeros_like(b_chunk)
     cand_block.scatter_(1, sel_pos, signs * alpha)
@@ -365,7 +384,9 @@ def quantize_leech24_lattice(
 
     w_hat = w_restored.reshape(-1)[: weights.numel()].reshape(orig_shape).to(weights.dtype)
     return w_hat, best_shell, best_scale
-    # =========================================================================
+
+
+# =========================================================================
 # 4. ТОЧНЫЙ КРИТИЧЕСКИЙ ТЕРНАРНЫЙ СОЛВЕР, АСИММЕТРИЧНЫЙ И СУПЕРКВАНТОВАТЕЛЬ
 # =========================================================================
 
@@ -433,8 +454,6 @@ def quantize_residual_2stage(weights: torch.Tensor, group_size: int = 32) -> tor
     res = weights - w1
     w2 = quantize_ternary_exact_blockwise(res, group_size=group_size)
     return (w1 + w2).to(weights.dtype)
-
-
 class VCoreSuperQuantizer(nn.Module):
     """
     Адаптивный самосертифицирующийся суперквантователь (MarkovL1SuperQuantizer.lean):
@@ -492,7 +511,9 @@ class VCoreSuperQuantizer(nn.Module):
             "actual_l1_err": float(torch.sum(torch.abs(weights.to(torch.float32) - w_restored.to(torch.float32))).item()),
         }
         return w_restored, stats
-    # =========================================================================
+
+
+# =========================================================================
 # 5. ПОЛНЫЙ КОНВЕЙЕР ALGORITHM 1: IN-DOMAIN W₈ + E₈ + l1-LoRA + РЕГИСТР ВЫБРОСОВ
 # =========================================================================
 
@@ -512,11 +533,6 @@ class VCoreInDomainHadamardLinear(nn.Module):
     """
     Реализация Algorithm 1 и Теоремы 5.1 (in_domain_hadamard_exact_dot):
     (W₈ w) · (W₈ x) = 8 · (w · x).
-    Объединяет:
-      1) Регистровую инверсию выбросов |w| >= limit;
-      2) Хранение весов E₈ (uint8 + fp16 scale) непосредственно в W₈-базисе;
-      3) Data-Free малоранговую L1-компенсацию остатка U @ V;
-      4) Эмиссию сертификата максимальной строчной L1-ошибки ε_final.
     """
 
     def __init__(
@@ -567,26 +583,22 @@ class VCoreInDomainHadamardLinear(nn.Module):
         dev = linear.weight.device
         w_orig = linear.weight.detach().to(torch.float32)
 
-        # Шаг 1: Регистровая инверсия выбросов
         w_main, w_reg = register_inversion_split(w_orig, limit=outlier_limit)
 
         eff_rank = min(lora_rank, out_f, in_f) if lora_rank > 0 else 0
         layer = cls(in_f, out_f, bias=(linear.bias is not None), lora_rank=eff_rank).to(dev)
 
-        # Сохраняем разреженный регистр выбросов для быстрого index_add_ без sparse_coo предупреждений
         nz = torch.nonzero(w_reg, as_tuple=False)
         if nz.numel() > 0:
             layer.outlier_rows = nz[:, 0].contiguous()
             layer.outlier_cols = nz[:, 1].contiguous()
             layer.outlier_values = w_reg[layer.outlier_rows, layer.outlier_cols].to(torch.float16)
 
-        # Шаг 2-3: Поворот W₈ и проекция на решётку E₈ в W₈-базисе
         w_rot = fwht_8(w_main.reshape(-1, 8))
         q_rot, idx, scales = quantize_e8_lattice(w_rot, use_hadamard=False)
         layer.e8_indices.copy_(idx)
         layer.e8_scales.copy_(scales.to(torch.float16))
 
-        # Шаг 4: Остаток E = W_main - (1/8) W₈(W_rot_hat) и Data-Free l1-LoRA
         w_e8_restored = (fwht_8(q_rot) * 0.125).reshape(out_f, in_f)
         residual = w_main - w_e8_restored
 
@@ -598,7 +610,6 @@ class VCoreInDomainHadamardLinear(nn.Module):
         else:
             final_res = residual
 
-        # Шаг 5: Эмиссия сертификата максимальной строчной L1-ошибки ε_final
         row_l1 = torch.sum(torch.abs(final_res), dim=1)
         layer.cert_row_l1_bound.copy_(torch.max(row_l1))
 
@@ -627,13 +638,17 @@ class VCoreInDomainHadamardLinear(nn.Module):
         if self.bias is not None:
             out = out + self.bias.to(torch.float32)
         return out.to(x.dtype).reshape(*orig_shape[:-1], self.out_features)
-        # =========================================================================
-# 6. 2:4 РАЗРЕЖЕННОСТЬ, DATA-FREE ℓ₁-LORA (С BACKFITTING), ℓ₁-GPTQ, MoE И FREIVALDS
+    # =========================================================================
+# 6. 2:4 РАЗРЕЖЕННОСТЬ (С ПОРОГОМ ЗАКЛИНИВАНИЯ 125/192), DATA-FREE ℓ₁-LORA, MoE И FREIVALDS
 # =========================================================================
 
 @torch.no_grad()
-def quantize_24_sparse_l1(weights: torch.Tensor) -> torch.Tensor:
-    """Аппаратная 2:4 структурная разреженность в метрике L1 (MarkovL1EntropyAndSparsity.lean)."""
+def quantize_24_sparse_l1(weights: torch.Tensor, fast_lock_prune: bool = True) -> torch.Tensor:
+    """
+    Аппаратная 2:4 структурная разреженность в метрике L1 (MarkovL1EntropyAndSparsity.lean).
+    При `fast_lock_prune=True` применяет аналитический порог заклинивания `125/192`
+    (Module 27, Теорема `fast_lock_prune_error_bound`) для O(1)-отсева слабых блоков.
+    """
     orig_shape = weights.shape
     flat = weights.reshape(-1).to(torch.float32)
     pad = (4 - (flat.numel() % 4)) % 4
@@ -641,6 +656,16 @@ def quantize_24_sparse_l1(weights: torch.Tensor) -> torch.Tensor:
         flat = torch.cat([flat, torch.zeros(pad, device=flat.device, dtype=flat.dtype)])
 
     blocks = flat.view(-1, 4)
+    abs_b = torch.abs(blocks)
+
+    if fast_lock_prune:
+        blk_scale = torch.max(abs_b, dim=1, keepdim=True).values
+        lock_cut = blk_scale * MARKOV_LOCK_THRESHOLD
+        blocks_work = torch.where(abs_b <= lock_cut, torch.zeros_like(blocks), blocks)
+        abs_b = torch.abs(blocks_work)
+    else:
+        blocks_work = blocks
+
     masks_list = [
         [1.0, 1.0, 0.0, 0.0],
         [1.0, 0.0, 1.0, 0.0],
@@ -650,8 +675,7 @@ def quantize_24_sparse_l1(weights: torch.Tensor) -> torch.Tensor:
         [0.0, 0.0, 1.0, 1.0],
     ]
     masks = torch.tensor(masks_list, device=blocks.device, dtype=torch.float32)
-    abs_b = torch.abs(blocks)
-    signs = torch.sign(blocks)
+    signs = torch.sign(blocks_work)
 
     best_err = torch.full((blocks.size(0),), float("inf"), device=blocks.device, dtype=torch.float32)
     best_q = torch.zeros_like(blocks)
@@ -729,7 +753,6 @@ def fit_datafree_l1_lora(
         cur_res = cur_res - torch.outer(u_r, v_row)
         active_ranks += 1
 
-    # Совместная доводка (backfitting) по уже найденным компонентам
     for _ in range(backfit_sweeps):
         for r in range(active_ranks):
             comp_r = torch.outer(U[:, r], V[r, :])
@@ -787,8 +810,13 @@ def verify_moe_routing_safety(
     gate_logits: torch.Tensor,
     logit_error_bounds: torch.Tensor,
     top_k: int = 2,
+    anisotropic: bool = False,
 ) -> bool:
-    """Проверка инвариантности Top-K маршрутизации MoE (MarkovL1MoERoutingAndDynamicBits.lean)."""
+    """
+    Проверка инвариантности Top-K маршрутизации MoE (MarkovL1MoERoutingAndDynamicBits.lean).
+    При `anisotropic=True` применяет 11-кратное сжатие погрешности на некритичных
+    (экваториальных) каналах по Теореме `moe_anisotropic_axis_ratio` (Module 27).
+    """
     g = gate_logits.reshape(-1).to(torch.float32)
     d = logit_error_bounds.reshape(-1).to(torch.float32)
     if top_k <= 0 or top_k >= g.numel():
@@ -798,8 +826,12 @@ def verify_moe_routing_safety(
     sel_idx = sorted_idx[:top_k]
     rej_idx = sorted_idx[top_k:]
 
+    d_eff = d.clone()
+    if anisotropic:
+        d_eff[rej_idx] = d_eff[rej_idx] / 11.0
+
     margins = g[sel_idx].unsqueeze(1) - g[rej_idx].unsqueeze(0)
-    thresholds = d[sel_idx].unsqueeze(1) + d[rej_idx].unsqueeze(0)
+    thresholds = d_eff[sel_idx].unsqueeze(1) + d_eff[rej_idx].unsqueeze(0)
     return bool(torch.all(margins > thresholds).item())
 
 
@@ -861,4 +893,5 @@ def quantize_model_vcore(
     return {
         "quantized_layers": float(replaced),
         "max_certified_row_l1_bound": max_cert_err,
-}
+        }
+            
