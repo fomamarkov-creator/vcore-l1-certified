@@ -98,14 +98,16 @@ class MarkovMatrixAnalyzer:
         self.DRIFT = DRIFT
 
     def find_resonance(self, target_n: int) -> Optional[int]:
-        limit_r = int(math.sqrt(target_n)) + 1
+        limit_r = int(math.sqrt(target_n)) + 2
         for r in np.arange(2.0, limit_r, self.LEEWAY):
-            impedance = target_n % r
-            if impedance < 0.001 or abs(impedance - r) < 0.001:
+            rem = target_n % r
+            offset = min(rem, abs(r - rem))
+            if offset <= self.LEEWAY:
                 potential_factor = round(float(r))
                 if potential_factor > 1 and target_n % potential_factor == 0:
                     return potential_factor
         return None
+
     # =========================================================================
 # 2. ВЕКТОРНЫЙ РЕЗОНАНСНЫЙ ПОДБОР МАСШТАБА И МНОГОКАНАЛЬНЫЙ ЭМРТ-ТОМОГРАФ ВЕСОВ
 # =========================================================================
