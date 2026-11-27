@@ -383,7 +383,7 @@ def repack_safetensors_layerwise(
                 continue
 
             if "embed_tokens" in name or "lm_head" in name:
-                has_separate_lm_head = "lm_head.weight" in state_dict
+                has_separate_lm_head = ("lm_head.weight" in state_dict) or (len(state_dict) < 150)
                 is_large_hidden = (tensor.ndim == 2 and tensor.size(1) >= 3072)
                 use_sph_here = spherical_emb and has_separate_lm_head and is_large_hidden
 
@@ -551,6 +551,13 @@ def repack_sharded_model(
         "total_l1_err": 0.0,
     }
     new_weight_map: Dict[str, str] = {}
+
+ idx_path = os.path.join(input_dir, "model.safetensors.index.json")
+ if spherical_emb and os.path.isfile(idx_path):
+     with open(idx_path, "r", encoding="utf-8") as f:
+         w_map = json.load(f).get("weight_map", {})
+     if "lm_head.weight" not in w_map:
+         spherical_emb = False
 
     for shard_path in shard_files:
         fname = os.path.basename(shard_path)
