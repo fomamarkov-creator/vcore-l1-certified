@@ -49,6 +49,11 @@ from vcore_l1 import (
     unpack_vcore_bundle_to_temp,
     repack_vlm_model,
     decompose_to_dyadic_vnodes
+    MARKOV_ZERO_INVERSION,
+    MARKOV_LOCK_THRESHOLD,
+    hcp12_isotropic_smooth,
+    compute_pore_equilibrium,
+    VCoreQATLinear,
 )
 
 
@@ -273,6 +278,42 @@ def main():
         
         vnode_blk, vnode_err = decompose_to_dyadic_vnodes(torch.tensor([16.0, -32.5, 0.0, 128.25]))
         assert vnode_blk.certified_contraction is True and vnode_err < 1e-3
+
+        # Проверка Модуля 27 (MarkovL1V256Upgrades: 7 апгрейдов V256)
+        assert abs(MARKOV_ZERO_INVERSION - 262.144) < 1e-6
+        assert abs(MARKOV_LOCK_THRESHOLD - (125.0 / 192.0)) < 1e-6
+        assert cert_back.get("v256_upgrades_stamp") == "VCORE-V256-UPGRADES-MARKOV-EFIM-2026"
+
+        # Апгрейд 2: Динамический Электрический Замок KV-кэша
+        cache_lock = VCoreDynamicCache(group_size=32, mode="spherical", electric_lock=True)
+        kl_out, _ = cache_lock.update(torch.randn(1, 2, 4, 32), torch.randn(1, 2, 4, 32), layer_idx=0)
+        assert kl_out.shape == (1, 2, 4, 32)
+
+        # Апгрейд 3: Критерий равновесия поры Ω_pore = 1
+        omega_eq, mismatch_eq = compute_pore_equilibrium(24.0, 24.0)
+        assert abs(omega_eq - 1.0) < 1e-8 and abs(mismatch_eq) < 1e-8
+
+        # Апгрейд 4: 12-точечный изотропный фильтр сглаживания 3HCP
+        x_hcp = torch.randn(4, 32)
+        x_sm = hcp12_isotropic_smooth(x_hcp, alpha=0.05)
+        assert x_sm.shape == x_hcp.shape and abs(float(x_sm.mean().item()) - float(x_hcp.mean().item())) < 1e-5
+
+        # Апгрейды 5 и 6: Быстрый 2:4 прунинг по порогу 125/192 и анизотропный MoE (11x)
+        w_sp_fast = quantize_24_sparse_l1(torch.randn(16, 32), fast_lock_prune=True)
+        assert int(torch.max(torch.count_nonzero(w_sp_fast.view(-1, 4), dim=1)).item()) <= 2
+        assert verify_moe_routing_safety(
+            torch.tensor([2.5, 2.0, 1.85, 0.5]),
+            torch.tensor([0.1, 0.1, 0.5, 0.5]),
+            top_k=2,
+            anisotropic=True,
+        )
+
+        # Апгрейд 7: Модулярный сброс QAT в кольце Z/256Z
+        qat_test = VCoreQATLinear(16, 8)
+        with torch.no_grad():
+            qat_test.weight[0, 0] = 300.0
+        reset_cnt = qat_test.apply_modular_plateau_reset()
+        assert reset_cnt == 1 and float(torch.abs(qat_test.weight[0, 0]).item()) < 256.0
     
     print(
         f"[OK] Все компоненты v5.0 (Lean 4 24-Module Core, Cross-Layer, Spherical E8, Integer-Only Q14/Q20, "
