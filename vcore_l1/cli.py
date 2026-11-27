@@ -37,6 +37,7 @@ def main():
     parser.add_argument("--export-gguf", default=None, help="Сразу экспортировать сжатую модель в .gguf (для llama.cpp / Ollama)")
     parser.add_argument("--push-to-hub", default=None, help="Опционально загрузить готовую модель на Hugging Face (user/model-vcore)")
     parser.add_argument("--token", default=None, help="Токен Hugging Face")
+    parser.add_argument("--tomography", action="store_true", help="Включить многоканальный ЭМРТ-томограф весов для автоподбора режимов слоёв")
 
     args = parser.parse_args()
 
@@ -79,6 +80,7 @@ def main():
             chol_map=chol_map,
             cross_layer_comp=cross_layer,
             spherical_emb=args.spherical_emb,
+            use_tomography=args.tomography,
         )
     elif os.path.isdir(args.input):
         stats = repack_sharded_model(
@@ -92,6 +94,7 @@ def main():
             chol_map=chol_map,
             cross_layer_comp=cross_layer,
             spherical_emb=args.spherical_emb,
+            use_tomography=args.tomography,
         )
     else:
         stats = repack_safetensors_layerwise(
@@ -105,6 +108,7 @@ def main():
             chol_map=chol_map,
             cross_layer_comp=cross_layer,
             spherical_emb=args.spherical_emb,
+            use_tomography=args.tomography,
         )
 
     print("=== V-CORE L1-CERTIFIED COMPRESSION REPORT ===")
