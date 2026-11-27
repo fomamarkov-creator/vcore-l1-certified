@@ -260,7 +260,131 @@ def scan_model_tomography(
 
     return tomogram
 
+@torch.no_grad()
+def surgical_unlearn_concept(
+    model: torch.nn.Module,
+    tokenizer: Any,
+    target_prompts: List[str],
+    neutral_prompts: Optional[List[str]] = None,
+    strength: float = 0.85,
+    layer_filter: Tuple[str, ...] = ("down_proj", "o_proj"),
+) -> Dict[str, Any]:
+    """
+    Хирургическое вырезание знаний / паттернов из модели (Differential EM-Tomography + Rank-1 Null-Space Projection):
+      1. Снимает дифференциальный контраст активаций (target - neutral) на выходных проекциях;
+      2. Вычисляет ортогональный вектор направления концепта u;
+      3. Вычитает проекцию W_clean = W - strength * (W u) u^T с переупаковкой квантованных слоёв.
+    """
+    from .inference_layer import VCoreLinear
+    from .quantizer import pack_ternary_to_uint8, quantize_ternary_exact_blockwise
 
+    if not neutral_prompts:
+        neutral_prompts = [
+            "The weather today is calm and clear across the region.",
+            "Mathematics studies numbers, structures, spaces, and change.",
+            "Water boils at one hundred degrees Celsius at standard pressure.",
+            "History records events and developments of human civilization.",
+        ]
+
+    device = next(model.parameters()).device
+    model.eval()
+
+    target_layers: Dict[str, torch.nn.Module] = {}
+    for name, mod in model.named_modules():
+        if isinstance(mod, (torch.nn.Linear, VCoreLinear)) and any(k in name for k in layer_filter):
+            target_layers[name] = mod
+
+    def _collect_mean_inputs(prompts: List[str]) -> Dict[str, torch.Tensor]:
+        sums: Dict[str, torch.Tensor] = {}
+        counts: Dict[str, int] = {}
+        hooks = []
+
+        def _make_hook(l_name: str):
+            def _hook(_mod, inp, _out):
+                if not inp or not isinstance(inp[0], torch.Tensor):
+                    return
+                x = inp[0].detach().to(torch.float32).reshape(-1, inp[0].size(-1))
+                vec = torch.mean(x, dim=0).cpu()
+                if l_name not in sums:
+                    sums[l_name] = vec
+                    counts[l_name] = 1
+                else:
+                    sums[l_name] += vec
+                    counts[l_name] += 1
+            return _hook
+
+        for l_name, mod in target_layers.items():
+            hooks.append(mod.register_forward_hook(_make_hook(l_name)))
+
+        for p in prompts:
+            toks = tokenizer(p, return_tensors="pt", truncation=True, max_length=128).to(device)
+            _ = model(**toks)
+
+        for h in hooks:
+            h.remove()
+
+        return {k: (sums[k] / max(counts[k], 1)) for k in sums}
+
+    base_acts = _collect_mean_inputs(neutral_prompts)
+    targ_acts = _collect_mean_inputs(target_prompts)
+
+    edited_layers = 0
+    total_energy_removed = 0.0
+
+    for l_name, mod in target_layers.items():
+        if l_name not in base_acts or l_name not in targ_acts:
+            continue
+
+        diff = (targ_acts[l_name] - base_acts[l_name]).to(device=device, dtype=torch.float32)
+        norm_diff = float(torch.linalg.norm(diff).item())
+        if norm_diff < 1e-6:
+            continue
+
+        u = diff / norm_diff  # Единичный вектор направления концепта (in_features,)
+
+        if isinstance(mod, VCoreLinear):
+            # Восстанавливаем матрицу весов, выполняем Rank-1 вычитание и переупаковываем
+            if hasattr(mod, "_w_cache") and mod._w_cache is not None:
+                w = mod._w_cache.to(torch.float32)
+            else:
+                from .quantizer import unpack_uint8_to_int4, unpack_uint8_to_ternary
+                num_elems = mod.out_features * mod.in_features
+                padded = ((num_elems + mod.group_size - 1) // mod.group_size) * mod.group_size
+                grid = (
+                    unpack_uint8_to_ternary(mod.vcore_packed, (padded,)).to(device)
+                    if mod.bits == 2
+                    else unpack_uint8_to_int4(mod.vcore_packed, (padded,)).to(device)
+                )
+                w = (grid.reshape(-1, mod.group_size) * mod.vcore_scales.to(torch.float32).unsqueeze(1)).reshape(-1)[
+                    :num_elems
+                ].reshape(mod.out_features, mod.in_features)
+
+            proj = torch.mv(w, u)  # (out_features,)
+            delta_w = strength * torch.outer(proj, u)
+            w_clean = w - delta_w
+            total_energy_removed += float(torch.sum(torch.abs(delta_w)).item())
+
+            if mod.bits == 2:
+                q_grid, new_scales = quantize_ternary_exact_blockwise(w_clean.reshape(-1), mod.group_size)
+                mod.vcore_packed.copy_(pack_ternary_to_uint8(q_grid).to(mod.vcore_packed.device))
+                mod.vcore_scales.copy_(new_scales.to(mod.vcore_scales.dtype))
+            mod._w_cache = w_clean.to(mod.vcore_scales.dtype)
+            edited_layers += 1
+
+        elif isinstance(mod, torch.nn.Linear):
+            w = mod.weight.data.to(torch.float32)
+            proj = torch.mv(w, u)
+            delta_w = strength * torch.outer(proj, u)
+            mod.weight.data.copy_((w - delta_w).to(mod.weight.dtype))
+            total_energy_removed += float(torch.sum(torch.abs(delta_w)).item())
+            edited_layers += 1
+
+    return {
+        "edited_layers": edited_layers,
+        "strength": strength,
+        "total_l1_energy_ablated": round(total_energy_removed, 4),
+    }
+        
 
 # =========================================================================
 # 3. ВИЗУАЛИЗАЦИЯ ЭНЕРГЕТИЧЕСКИХ ЯМ (ОПЦИОНАЛЬНО, ЕСЛИ УСТАНОВЛЕН MATPLOTLIB)
