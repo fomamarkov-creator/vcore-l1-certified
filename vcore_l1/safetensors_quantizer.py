@@ -1,7 +1,6 @@
 # Copyright (C) 2026 Efim Sergeevich Markov (ef.87@mail.ru)
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
-import gc
 import glob
 import json
 import os
@@ -121,19 +120,12 @@ def quantize_ternary_exact_critical(
             out_scales.narrow(0, start, c_len).copy_(best_scales.reshape(-1))
 
         return out_q, out_mask, out_scales
-
-
 @torch.no_grad()
 def quantize_ternary_triangular_feedback(
     w_2d: torch.Tensor,
     R_upper: torch.Tensor,
     group_size: int = 32,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Реализация теоремы `triangular_channel_exact_reduction` (MarkovL1TriangularActivation.lean):
-    переносит ошибку квантования (w_i - wHat_i) между коррелированными каналами i < j
-    внутри каждого блока через верхнетреугольный фактор Холецкого R.
-    """
     out_f, in_f = w_2d.shape
     device, dtype = w_2d.device, w_2d.dtype
     R = R_upper.to(device=device, dtype=dtype)
@@ -261,12 +253,12 @@ def _quantize_tensor_cascade(
         return None
 
 
-def _estimate_threshold_for_vram(
+def _estimate_max_rel_error_for_budget(
     state_dict: Dict[str, torch.Tensor],
     target_vram_gb: float,
     group_size: int,
-    theta: float,
-    auto_theta: bool,
+    theta: float = 1e-4,
+    auto_theta: bool = True,
 ) -> float:
     with torch.no_grad():
         target_bytes = target_vram_gb * (1024 ** 3)
@@ -309,14 +301,13 @@ def _estimate_threshold_for_vram(
             cur_bytes -= (fp_b - q2_b)
             chosen_thresh = max(chosen_thresh, rel_err + 1e-4)
         return min(chosen_thresh, 0.95)
-def _restore_quantized_tensor(
+    def _restore_quantized_tensor(
     grid: torch.Tensor,
     scales: torch.Tensor,
     chosen_g: int,
     orig_shape: Tuple[int, ...],
     perm: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Восстанавливает квантованный тензор в исходный порядок каналов для расчёта E = W - Ŵ."""
     total_elems = 1
     for d in orig_shape:
         total_elems *= d
@@ -325,6 +316,63 @@ def _restore_quantized_tensor(
         inv_perm = torch.argsort(perm)
         w_hat = w_hat.index_select(1, inv_perm)
     return w_hat
+
+
+def _quantize_layer_adaptive(
+    w_f32: torch.Tensor,
+    base_group_size: int = 32,
+    max_rel_error: float = 0.25,
+    theta: float = 1e-4,
+    auto_theta: bool = True,
+    cascade: bool = True,
+    act_weights: Optional[torch.Tensor] = None,
+    chol_r: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int, int, float, float, torch.Tensor]:
+    with torch.no_grad():
+        orig_l1 = float(torch.sum(torch.abs(w_f32)).item())
+        perm = None
+        w_work = w_f32
+        act_work = act_weights
+        chol_work = chol_r
+
+        if w_f32.ndim == 2 and w_f32.size(1) >= 64 and chol_r is None:
+            col_scores = torch.mean(torch.abs(w_f32), dim=0)
+            if act_weights is not None and act_weights.numel() == w_f32.size(1):
+                col_scores = col_scores * torch.abs(act_weights)
+            perm = torch.argsort(col_scores, descending=True)
+            w_work = w_f32.index_select(1, perm)
+            if act_weights is not None and act_weights.numel() == w_f32.size(1):
+                act_work = act_weights.index_select(0, perm)
+
+        cascade_groups = [g for g in (base_group_size, 64, 32, 16) if g <= base_group_size] if cascade else [base_group_size]
+        if not cascade_groups:
+            cascade_groups = [base_group_size]
+
+        res = _quantize_tensor_cascade(
+            w_work,
+            cascade_groups=cascade_groups,
+            theta=theta,
+            max_rel_error=max_rel_error,
+            auto_theta=auto_theta,
+            allow_int4=True,
+            act_scales=act_work,
+            chol_R=chol_work,
+        )
+        if res is None:
+            eff_g4 = min(32, w_work.numel())
+            grid, scales, err = _quantize_int4_blockwise(w_work, group_size=eff_g4)
+            chosen_g, used_bits = eff_g4, 4
+        else:
+            grid, scales, chosen_g, used_bits, err = res
+
+        if used_bits == 2:
+            packed, _ = pack_ternary_to_uint8(grid)
+        else:
+            packed, _ = pack_int4_to_uint8(grid)
+
+        w_hat = _restore_quantized_tensor(grid, scales, chosen_g, tuple(w_f32.shape), perm=perm)
+        return packed, scales.to(torch.float16), perm, chosen_g, used_bits, orig_l1, float(err), w_hat
+
 
 def repack_safetensors_layerwise(
     input_path: str,
@@ -341,20 +389,12 @@ def repack_safetensors_layerwise(
     use_tomography: bool = False,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-
-
-    """
-    Послойная потоковая упаковка одного файла `.safetensors` с поддержкой:
-      - Межслойной компенсации кривизны (`v_proj -> o_proj`, `up_proj -> down_proj`);
-      - Сферического/гиперболического кода E₈ для `embed_tokens` и `lm_head` (`--spherical-emb`);
-      - Многоканального ЭМРТ-томографа весов (`--tomography`).
-    """
     work_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     state_dict = load_file(input_path)
     out_tensors: Dict[str, torch.Tensor] = {}
 
     if target_vram_gb is not None:
-        max_rel_error = _estimate_max_rel_error_for_budget(state_dict, target_vram_gb, group_size)
+        max_rel_error = _estimate_max_rel_error_for_budget(state_dict, target_vram_gb, group_size, theta=theta)
 
     tomogram: Dict[str, Dict[str, Any]] = {}
     if use_tomography:
@@ -435,7 +475,7 @@ def repack_safetensors_layerwise(
             if src_name is not None and src_name in state_dict and src_name in quant_cache:
                 w1_orig = state_dict[src_name].to(device=work_device, dtype=torch.float32)
                 w1_quant = quant_cache[src_name].to(device=work_device, dtype=torch.float32)
-                if w1_orig.shape[0] == w_f32.shape[1]:
+                if w1_orig.shape == w_f32.shape:
                     w_f32, _ = apply_cross_layer_compensation(w1_orig, w1_quant, w_f32, dampening=0.5)
                     compensated_layers += 1
                 del w1_orig, w1_quant
@@ -452,6 +492,7 @@ def repack_safetensors_layerwise(
             w_f32,
             base_group_size=group_size,
             max_rel_error=layer_max_err,
+            theta=theta,
             act_weights=act_w,
             chol_r=chol_r,
         )
@@ -501,7 +542,8 @@ def repack_safetensors_layerwise(
         "total_l1_orig": total_l1_orig,
         "total_l1_err": total_l1_err,
         "compression_ratio": total_orig_bytes / max(total_packed_bytes, 1),
-    }
+}
+
 def repack_sharded_model(
     input_dir: str,
     output_dir: str,
@@ -528,6 +570,7 @@ def repack_sharded_model(
             if os.path.isfile(src):
                 shutil.copy2(src, os.path.join(output_dir, fname))
 
+    per_shard_vram = (target_vram_gb / len(shard_files)) if target_vram_gb else None
     agg = {
         "shards_processed": len(shard_files),
         "quantized_158bit_layers": 0,
@@ -556,12 +599,13 @@ def repack_sharded_model(
             shard_path,
             out_shard,
             group_size=group_size,
+            theta=theta,
             max_rel_error=max_rel_error,
-            target_vram_gb=target_vram_gb,
+            target_vram_gb=per_shard_vram,
             device=device,
             activation_map=activation_map,
             chol_map=chol_map,
-            cross_layer=cross_layer,
+            cross_layer_comp=cross_layer_comp,
             spherical_emb=spherical_emb,
             use_tomography=use_tomography,
         )
@@ -582,19 +626,18 @@ def repack_sharded_model(
         for pk in packed_keys:
             new_weight_map[pk] = base_name
 
-    idx_path = os.path.join(input_dir, "model.safetensors.index.json")
     if os.path.isfile(idx_path):
         with open(idx_path, "r", encoding="utf-8") as f:
             idx_data = json.load(f)
         idx_data["weight_map"] = new_weight_map
-        if "metadata" in idx_data and "total_size" in idx_data["metadata"]:
+        idx_data.setdefault("metadata", {})["vcore_quantized"] = "v6-tomography-certified"
+        if "total_size" in idx_data["metadata"]:
             idx_data["metadata"]["total_size"] = int(agg["packed_size_mb"] * (1024 ** 2))
         with open(os.path.join(output_dir, "model.safetensors.index.json"), "w", encoding="utf-8") as f:
             json.dump(idx_data, f, indent=2)
 
     agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
     return agg
-
 def repack_hf_hub_model(
     repo_id: str,
     output_dir: str,
@@ -612,205 +655,11 @@ def repack_hf_hub_model(
     use_tomography: bool = False,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-
-    """
-    Потоковая загрузка и сжатие модели напрямую из Hugging Face Hub по одному шарду:
-    после упаковки каждого шарда удаляет его из локального кэша, экономя место на диске.
-    """
-    from huggingface_hub import HfApi, hf_hub_download
-
-    os.makedirs(output_dir, exist_ok=True)
-    api = HfApi()
-    repo_files = api.list_repo_files(repo_id=repo_id, revision=revision)
-
-    shard_names = sorted([f for f in repo_files if f.endswith(".safetensors")])
-    if not shard_names:
-        raise FileNotFoundError(f"В репозитории {repo_id} не найдены .safetensors файлы")
-
-    for fname in repo_files:
-        if not fname.endswith(".safetensors") and not fname.endswith(".index.json") and "/" not in fname:
-            local_meta = hf_hub_download(repo_id=repo_id, filename=fname, revision=revision)
-            shutil.copy2(local_meta, os.path.join(output_dir, fname))
-
-    agg = {
-        "shards_processed": len(shard_names),
-        "quantized_158bit_layers": 0,
-        "quantized_int4_layers": 0,
-        "spherical_e8_layers": 0,
-        "cross_layer_compensated": 0,
-        "rolled_back_fp16_layers": 0,
-        "orig_size_mb": 0.0,
-        "packed_size_mb": 0.0,
-        "total_l1_orig": 0.0,
-        "total_l1_err": 0.0,
-    }
-    new_weight_map: Dict[str, str] = {}
-
-    for sname in shard_names:
-        local_shard = hf_hub_download(repo_id=repo_id, filename=sname, revision=revision)
-        out_shard = os.path.join(output_dir, os.path.basename(sname))
-        st = repack_safetensors_layerwise(
-            local_shard,
-            out_shard,
-            group_size=group_size,
-            max_rel_error=max_rel_error,
-            target_vram_gb=target_vram_gb,
-            device=device,
-            activation_map=activation_map,
-            chol_map=chol_map,
-            cross_layer=cross_layer,
-            spherical_emb=spherical_emb,
-            use_tomography=use_tomography,
-        )
-        for k in (
-            "quantized_158bit_layers",
-            "quantized_int4_layers",
-            "spherical_e8_layers",
-            "cross_layer_compensated",
-            "rolled_back_fp16_layers",
-            "orig_size_mb",
-            "packed_size_mb",
-            "total_l1_orig",
-            "total_l1_err",
-        ):
-            agg[k] += st[k]
-
-        for pk in load_file(out_shard).keys():
-            new_weight_map[pk] = os.path.basename(sname)
-
-        real_shard = os.path.realpath(local_shard)
-        if os.path.isfile(real_shard):
-            os.remove(real_shard)
-
-    index_candidates = [f for f in repo_files if f.endswith(".safetensors.index.json")]
-    if index_candidates:
-        local_idx = hf_hub_download(repo_id=repo_id, filename=index_candidates[0], revision=revision)
-        with open(local_idx, "r", encoding="utf-8") as f:
-            idx_data = json.load(f)
-        idx_data["weight_map"] = new_weight_map
-        if "metadata" in idx_data and "total_size" in idx_data["metadata"]:
-            idx_data["metadata"]["total_size"] = int(agg["packed_size_mb"] * (1024 ** 2))
-        with open(os.path.join(output_dir, os.path.basename(index_candidates[0])), "w", encoding="utf-8") as f:
-            json.dump(idx_data, f, indent=2)
-
-    agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
-    return agg
-    
-
-
-
-
-def repack_sharded_model(
-    input_dir: str,
-    output_dir: str,
-    group_size: int = 32,
-    theta: float = 1e-4,
-    max_rel_error: float = 0.40,
-    include_aux_layers: bool = False,
-    auto_theta: bool = True,
-    cascade: bool = True,
-    target_vram_gb: Optional[float] = None,
-    activation_map: Optional[Dict[str, torch.Tensor]] = None,
-    chol_map: Optional[Dict[str, torch.Tensor]] = None,
-    cross_layer_comp: bool = True,
-    spherical_emb: bool = False,
-) -> Dict[str, float]:
-    os.makedirs(output_dir, exist_ok=True)
-    shard_files = sorted(glob.glob(os.path.join(input_dir, "*.safetensors")))
-    if not shard_files:
-        raise FileNotFoundError(f"В папке {input_dir} не найдены файлы .safetensors")
-
-    per_shard_vram = (target_vram_gb / len(shard_files)) if target_vram_gb else None
-    agg = {
-        "shards_processed": len(shard_files),
-        "quantized_158bit_layers": 0,
-        "quantized_int4_layers": 0,
-        "spherical_e8_layers": 0,
-        "cross_layer_compensated": 0,
-        "rolled_back_fp16_layers": 0,
-        "orig_size_mb": 0.0,
-        "packed_size_mb": 0.0,
-            "total_l1_orig": 0.0,
-        "total_l1_err": 0.0,
-    }
-    new_weight_map: Dict[str, str] = {}
-    idx_path = os.path.join(input_dir, "model.safetensors.index.json")
-    if spherical_emb and os.path.isfile(idx_path):
-        with open(idx_path, "r", encoding="utf-8") as f:
-            w_map = json.load(f).get("weight_map", {})
-        if "lm_head.weight" not in w_map:
-            spherical_emb = False
-
-    for shard_path in shard_files:
-
-        fname = os.path.basename(shard_path)
-        out_shard = os.path.join(output_dir, fname)
-        st = repack_safetensors_layerwise(
-            shard_path,
-            out_shard,
-            group_size=group_size,
-            theta=theta,
-            max_rel_error=max_rel_error,
-            include_aux_layers=include_aux_layers,
-            auto_theta=auto_theta,
-            cascade=cascade,
-            target_vram_gb=per_shard_vram,
-            activation_map=activation_map,
-            chol_map=chol_map,
-            cross_layer_comp=cross_layer_comp,
-            spherical_emb=spherical_emb,
-        )
-        for k in (
-            "quantized_158bit_layers",
-            "quantized_int4_layers",
-            "spherical_e8_layers",
-            "cross_layer_compensated",
-            "rolled_back_fp16_layers",
-            "orig_size_mb",
-            "packed_size_mb",
-            "total_l1_orig",
-            "total_l1_err",
-        ):
-            agg[k] += st[k]
-
-        for k in load_file(out_shard).keys():
-            new_weight_map[k] = fname
-
-    for item in os.listdir(input_dir):
-        src_item = os.path.join(input_dir, item)
-        dst_item = os.path.join(output_dir, item)
-        if item == "model.safetensors.index.json":
-            with open(src_item, "r", encoding="utf-8") as f:
-                idx_data = json.load(f)
-            idx_data["weight_map"] = new_weight_map
-            idx_data.setdefault("metadata", {})["vcore_quantized"] = "v5-crosslayer-spherical"
-            with open(dst_item, "w", encoding="utf-8") as f:
-                json.dump(idx_data, f, indent=2)
-        elif not item.endswith(".safetensors") and os.path.isfile(src_item):
-            shutil.copy2(src_item, dst_item)
-
-    agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
-    return agg
-
-
-def repack_hf_hub_model(
-    repo_id: str,
-    output_dir: str,
-    group_size: int = 32,
-    theta: float = 1e-4,
-    max_rel_error: float = 0.40,
-    token: Optional[str] = None,
-    target_vram_gb: Optional[float] = None,
-    activation_map: Optional[Dict[str, torch.Tensor]] = None,
-    chol_map: Optional[Dict[str, torch.Tensor]] = None,
-    cross_layer_comp: bool = True,
-    spherical_emb: bool = False,
-) -> Dict[str, float]:
     from huggingface_hub import HfApi, hf_hub_download
 
     os.makedirs(output_dir, exist_ok=True)
     api = HfApi(token=token)
-    repo_files = api.list_repo_files(repo_id=repo_id)
+    repo_files = api.list_repo_files(repo_id=repo_id, revision=revision)
     shard_names = sorted([f for f in repo_files if f.endswith(".safetensors")])
     if not shard_names:
         raise FileNotFoundError(f"В репозитории {repo_id} нет файлов .safetensors")
@@ -833,12 +682,16 @@ def repack_hf_hub_model(
     with tempfile.TemporaryDirectory() as tmp_dl:
         for fname in repo_files:
             if not fname.endswith(".safetensors") and "/" not in fname:
-                local_cfg = hf_hub_download(repo_id=repo_id, filename=fname, local_dir=tmp_dl, token=token)
+                local_cfg = hf_hub_download(
+                    repo_id=repo_id, filename=fname, local_dir=tmp_dl, revision=revision, token=token
+                )
                 if fname != "model.safetensors.index.json":
                     shutil.copy2(local_cfg, os.path.join(output_dir, fname))
 
         for s_name in shard_names:
-            local_shard = hf_hub_download(repo_id=repo_id, filename=s_name, local_dir=tmp_dl, token=token)
+            local_shard = hf_hub_download(
+                repo_id=repo_id, filename=s_name, local_dir=tmp_dl, revision=revision, token=token
+            )
             out_shard = os.path.join(output_dir, os.path.basename(s_name))
             st = repack_safetensors_layerwise(
                 local_shard,
@@ -847,10 +700,12 @@ def repack_hf_hub_model(
                 theta=theta,
                 max_rel_error=max_rel_error,
                 target_vram_gb=per_shard_vram,
+                device=device,
                 activation_map=activation_map,
                 chol_map=chol_map,
                 cross_layer_comp=cross_layer_comp,
                 spherical_emb=spherical_emb,
+                use_tomography=use_tomography,
             )
             for k in (
                 "quantized_158bit_layers",
@@ -876,10 +731,11 @@ def repack_hf_hub_model(
             with open(idx_src, "r", encoding="utf-8") as f:
                 idx_data = json.load(f)
             idx_data["weight_map"] = new_weight_map
-            idx_data.setdefault("metadata", {})["vcore_quantized"] = "v5-crosslayer-spherical"
+            idx_data.setdefault("metadata", {})["vcore_quantized"] = "v6-tomography-certified"
+            if "total_size" in idx_data["metadata"]:
+                idx_data["metadata"]["total_size"] = int(agg["packed_size_mb"] * (1024 ** 2))
             with open(os.path.join(output_dir, "model.safetensors.index.json"), "w", encoding="utf-8") as f:
                 json.dump(idx_data, f, indent=2)
 
     agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
     return agg
-        
