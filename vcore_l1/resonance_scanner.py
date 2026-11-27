@@ -320,13 +320,15 @@ def surgical_unlearn_concept(
             hooks.append(mod.register_forward_hook(_make_hook(l_name)))
 
         for p in prompts:
-            toks = tokenizer(p, return_tensors="pt", truncation=True, max_length=128).to(device)
+            raw_toks = tokenizer(p, return_tensors="pt", truncation=True, max_length=128)
+            toks = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in raw_toks.items()}
             _ = model(**toks)
 
         for h in hooks:
             h.remove()
 
         return {k: (sums[k] / max(counts[k], 1)) for k in sums}
+    
 
     base_acts = _collect_mean_inputs(neutral_prompts)
     targ_acts = _collect_mean_inputs(target_prompts)
