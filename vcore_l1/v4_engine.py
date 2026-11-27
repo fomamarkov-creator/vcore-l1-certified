@@ -180,8 +180,9 @@ class VCoreLUTLinear(nn.Module):
         if self.bias is not None:
             out = out + self.bias.to(torch.float32)
         return out.to(x.dtype).reshape(*orig_shape[:-1], self.out_features)
-  # =========================================================================
-# 3. АДАПТИВНЫЙ ПЛАНИРОВЩИК MIXED-LATTICE И СЕРТИФИКАТ БЛОКА ТРАНСФОРМЕРА
+
+# =========================================================================
+# 3. АДАПТИВНЫЙ ПЛАНИРОВЩИК MIXED-LATTICE (С КРИТЕРИЕМ ПОРЫ Ω_pore = 1)
 # =========================================================================
 
 @dataclass
@@ -193,15 +194,26 @@ class MixedLatticeAssignment:
     holder_drift_bound: float
 
 
+def compute_pore_equilibrium(x_block_dim: float, y_shell_dim: float) -> Tuple[float, float]:
+    """
+    Критерий равновесия поры (Module 27, Теорема `mixed_lattice_pore_equilibrium`):
+    вычисляет индекс поры Ω_pore = X / Y и безразмерное рассогласование |Ω_pore - 1|.
+    При Ω_pore = 1.0 энергия рассогласования оболочки равна 0.
+    """
+    omega = x_block_dim / max(y_shell_dim, 1e-8)
+    mismatch = abs(omega - 1.0)
+    return omega, mismatch
+
+
 def allocate_mixed_lattice(
     layer_specs: List[Tuple[str, int, float]],
     target_avg_bpw: float = 0.85,
 ) -> Tuple[List[MixedLatticeAssignment], Dict[str, float]]:
     """
-    Реализация `verifyMixedLatticePlanQ` (MarkovL1FullTransformerCert.lean):
+    Реализация `verifyMixedLatticePlanQ` (MarkovL1FullTransformerCert.lean)
+    с предварительной оценкой равновесия поры Ω_pore = X / Y (Module 27):
     назначает слоям модели решётки (Λ₂₄ 0.733b, E₈ 0.989b, D₄ 1.161b, 1.58b)
-    так, чтобы средний битрейт по всей сети не превышал `target_avg_bpw`,
-    защищая наиболее чувствительные проекции (`v_proj`, `down_proj`).
+    так, чтобы средний битрейт по всей сети не превышал `target_avg_bpw`.
     """
     mode_table = {
         "leech24": 0.733,
@@ -222,13 +234,14 @@ def allocate_mixed_lattice(
         )
 
     total_params = max(sum(a.param_count for a in assignments), 1)
-    order = sorted(
-        range(len(assignments)),
-        key=lambda i: (
-            2.0 if ("v_proj" in assignments[i].layer_name or "down_proj" in assignments[i].layer_name) else 1.0
-        ) * assignments[i].holder_drift_bound,
-        reverse=True,
-    )
+    # Приоритет апгрейда с учётом чувствительности и рассогласования поры Ω_pore
+    def _layer_priority(idx: int) -> float:
+        a = assignments[idx]
+        role_w = 2.0 if ("v_proj" in a.layer_name or "down_proj" in a.layer_name) else 1.0
+        _, pore_mismatch = compute_pore_equilibrium(float(a.param_count % 24 or 24), 24.0)
+        return role_w * a.holder_drift_bound * (1.0 + pore_mismatch)
+
+    order = sorted(range(len(assignments)), key=_layer_priority, reverse=True)
 
     upgrade_chain = [("e8", 0.989, 0.78), ("d4", 1.161, 0.62), ("ternary158", 1.585, 0.45)]
     for idx in order:
@@ -358,4 +371,4 @@ def golay24_syndrome_decode(received_24bit: int) -> Tuple[int, int]:
             syn |= 1 << j
     err_vec = syn_lut.get(syn, 0)
     return (word ^ err_vec), syn
-      
+    
