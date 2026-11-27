@@ -330,16 +330,18 @@ def repack_safetensors_layerwise(
     input_path: str,
     output_path: str,
     group_size: int = 32,
+    theta: float = 1e-4,
     max_rel_error: float = 0.25,
     target_vram_gb: Optional[float] = None,
     device: Optional[str] = None,
     activation_map: Optional[Dict[str, torch.Tensor]] = None,
     chol_map: Optional[Dict[str, torch.Tensor]] = None,
-    cross_layer: bool = True,
+    cross_layer_comp: bool = True,
     spherical_emb: bool = False,
     use_tomography: bool = False,
     **kwargs: Any,
 ) -> Dict[str, Any]:
+
 
     """
     Послойная потоковая упаковка одного файла `.safetensors` с поддержкой:
@@ -504,14 +506,16 @@ def repack_sharded_model(
     input_dir: str,
     output_dir: str,
     group_size: int = 32,
+    theta: float = 1e-4,
     max_rel_error: float = 0.25,
     target_vram_gb: Optional[float] = None,
     device: Optional[str] = None,
     activation_map: Optional[Dict[str, torch.Tensor]] = None,
     chol_map: Optional[Dict[str, torch.Tensor]] = None,
-    cross_layer: bool = True,
+    cross_layer_comp: bool = True,
     spherical_emb: bool = False,
     use_tomography: bool = False,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     shard_files = sorted(glob.glob(os.path.join(input_dir, "*.safetensors")))
@@ -591,21 +595,24 @@ def repack_sharded_model(
     agg["compression_ratio"] = agg["orig_size_mb"] / max(agg["packed_size_mb"], 1e-6)
     return agg
 
-
 def repack_hf_hub_model(
     repo_id: str,
     output_dir: str,
     group_size: int = 32,
+    theta: float = 1e-4,
     max_rel_error: float = 0.25,
+    token: Optional[str] = None,
     target_vram_gb: Optional[float] = None,
     device: Optional[str] = None,
     activation_map: Optional[Dict[str, torch.Tensor]] = None,
     chol_map: Optional[Dict[str, torch.Tensor]] = None,
     revision: Optional[str] = None,
-    cross_layer: bool = True,
+    cross_layer_comp: bool = True,
     spherical_emb: bool = False,
     use_tomography: bool = False,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
+
     """
     Потоковая загрузка и сжатие модели напрямую из Hugging Face Hub по одному шарду:
     после упаковки каждого шарда удаляет его из локального кэша, экономя место на диске.
