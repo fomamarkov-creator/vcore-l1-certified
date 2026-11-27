@@ -285,7 +285,7 @@ If you use **V-CORE (ℓ₁)-Certified** or the **Lean 4 ℓ₁-Projection Compl
 }
 ```
 # Zero-Copy mmap execution of a single-file .vcore bundle directly in native C++17 / AVX2 (with Lean 4 Passport check)
-
-```.build/vcore-run --model ./qwen2.5-1.5b.vcore --prompt "Explain L1 median quantization." --tokens 64 --integer-only
+```
+.build/vcore-run --model ./qwen2.5-1.5b.vcore --prompt "Explain L1 median quantization." --tokens 64 --integer-only
 ```
 
