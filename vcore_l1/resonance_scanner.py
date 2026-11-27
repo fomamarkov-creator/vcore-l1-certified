@@ -160,16 +160,16 @@ def find_optimal_resonant_scale(
 @torch.no_grad()
 def scan_model_tomography(
     model_or_state_dict: Dict[str, torch.Tensor] | torch.nn.Module,
+    activation_map: Optional[Dict[str, torch.Tensor]] = None,
+    head_dim: int = 64,
     num_candidates: int = 16,
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Многоканальный резонансный томограф весов модели (Weight EM-Tomography):
-    сканирует каждый 2D-слой по 4 каналам диагностики:
-      1. Продольный срез по входным каналам (Z_in и пиковые выбросы);
-      2. Поперечный срез по выходным нейронам (Z_out и когерентность строк);
-      3. Резонансный импеданс блоков весов;
-      4. Спектральный выигрыш от вращения Уолша–Адамара W8.
-    Возвращает томографическую карту каждого слоя и рекомендуемый режим сжатия.
+    Многоканальный контрастный ЭМРТ-томограф весов модели (Weight EM-Tomography v2):
+      1. Продольный контрастный срез по входным каналам (Z_in с весом активаций γ_j);
+      2. Поперечный срез по выходным нейронам (Z_out);
+      3. По-головой срез (Attention Head Tomography) для проекций внимания (q/k/v/o_proj);
+      4. Резонансный импеданс 32D-блоков и спектральный выигрыш от вращения Адамара W8.
     """
     from .super_quantizer import fwht_8
 
@@ -192,15 +192,34 @@ def scan_model_tomography(
         w = tensor.to(torch.float32)
         abs_w = torch.abs(w)
 
-        # Канал 1: Продольный срез (входные каналы / столбцы)
+        # Канал 1: Функциональный контраст (если есть статистика активаций γ_j)
+        has_contrast = False
+        if activation_map is not None and name in activation_map:
+            gamma = activation_map[name].to(device=w.device, dtype=torch.float32).reshape(-1)
+            if gamma.numel() == w.size(1):
+                gamma_norm = gamma / torch.clamp(torch.mean(gamma), min=1e-6)
+                abs_w = abs_w * gamma_norm.unsqueeze(0)
+                has_contrast = True
+
+        # Продольный срез (входные каналы) и поперечный срез (выходные нейроны)
         col_l1 = torch.mean(abs_w, dim=0)
         col_max = torch.max(abs_w, dim=0).values
         in_peak_ratio = float((torch.max(col_max) / torch.clamp(torch.median(col_l1), min=1e-6)).item())
 
-        # Канал 2: Поперечный срез (выходные нейроны / строки)
         row_l1 = torch.mean(abs_w, dim=1)
         row_max = torch.max(abs_w, dim=1).values
         out_peak_ratio = float((torch.max(row_max) / torch.clamp(torch.median(row_l1), min=1e-6)).item())
+
+        # Канал 2: По-головой срез (Attention Head Tomography для q/k/v/o_proj)
+        is_attn = any(k in name for k in ("q_proj", "k_proj", "v_proj", "o_proj"))
+        hot_heads = 0
+        total_heads = 0
+        if is_attn and w.size(0) >= head_dim and (w.size(0) % head_dim == 0):
+            total_heads = w.size(0) // head_dim
+            heads_view = abs_w.view(total_heads, head_dim, w.size(1))
+            head_energies = torch.mean(heads_view, dim=(1, 2))
+            med_head = torch.clamp(torch.median(head_energies), min=1e-6)
+            hot_heads = int((head_energies > (med_head * 1.45)).sum().item())
 
         # Канал 3: Резонансный импеданс 32-элементных блоков
         pad = (32 - (w.numel() % 32)) % 32
@@ -221,7 +240,7 @@ def scan_model_tomography(
         # Вердикт томографа по оптимальному режиму сжатия слоя
         if "embed_tokens" in name or "lm_head" in name:
             rec_mode = "FP16_PROTECTED"
-        elif in_peak_ratio > 45.0 or out_peak_ratio > 45.0 or mean_impedance > 190.0:
+        elif in_peak_ratio > 45.0 or out_peak_ratio > 45.0 or mean_impedance > 190.0 or (total_heads > 0 and hot_heads >= max(1, total_heads // 3)):
             rec_mode = "INT4_HIGH_PRECISION"
         elif hadamard_gain > 1.35 and mean_impedance < 145.0:
             rec_mode = "E8_LATTICE_SUB1BIT"
@@ -230,14 +249,17 @@ def scan_model_tomography(
 
         tomogram[name] = {
             "shape": tuple(w.shape),
+            "contrast_enabled": has_contrast,
             "in_peak_ratio": round(in_peak_ratio, 2),
             "out_peak_ratio": round(out_peak_ratio, 2),
+            "hot_heads": f"{hot_heads}/{total_heads}" if total_heads > 0 else "N/A",
             "mean_impedance": round(mean_impedance, 2),
             "hadamard_gain": round(hadamard_gain, 2),
             "recommended_mode": rec_mode,
         }
 
     return tomogram
+
 
 
 # =========================================================================
