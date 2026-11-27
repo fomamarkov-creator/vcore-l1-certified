@@ -100,13 +100,15 @@ class MarkovMatrixAnalyzer:
     def find_resonance(self, target_n: int) -> Optional[int]:
         limit_r = int(math.sqrt(target_n)) + 2
         for r in np.arange(2.0, limit_r, self.LEEWAY):
-            rem = target_n % r
-            offset = min(rem, abs(r - rem))
-            if offset <= self.LEEWAY:
-                potential_factor = round(float(r))
+            r_val = float(r)
+            rem = target_n % r_val
+            offset = min(rem, abs(r_val - rem))
+            if offset <= self.LEEWAY * (target_n / max(r_val, 1.0)):
+                potential_factor = round(r_val)
                 if potential_factor > 1 and target_n % potential_factor == 0:
                     return potential_factor
         return None
+
 
 
     # =========================================================================
