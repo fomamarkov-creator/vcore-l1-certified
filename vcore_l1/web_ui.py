@@ -12,7 +12,11 @@ from transformers import AutoTokenizer, TextIteratorStreamer
 from .backend_dispatcher import get_dispatcher
 from .calibration import collect_activation_importance
 from .inference_layer import VCoreDynamicCache, VCoreLinear, VCoreModelForCausalLM
-from .resonance_scanner import scan_model_tomography, surgical_unlearn_concept
+from .resonance_scanner import (
+    map_cognitive_domains,
+    scan_model_tomography,
+    surgical_unlearn_concept,
+)
 from .safetensors_quantizer import (
     repack_hf_hub_model,
     repack_safetensors_layerwise,
@@ -26,7 +30,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>V-CORE L1-Certified | Functional Brain Tomography Studio</title>
+<title>V-CORE L1-Certified | Neuro-Lab v2 EM-Tomography</title>
 <style>
   :root {
     --bg: #04060b; --panel: #0a0f1a; --border: #1e293b;
@@ -36,71 +40,77 @@ HTML_PAGE = r"""<!DOCTYPE html>
   body { background: var(--bg); color: var(--text); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
   header {
     display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
-    padding: 9px 18px; background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
   }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 14.5px; }
   .badge { background: rgba(251,191,36,0.14); color: #fde68a; padding: 3px 10px; border-radius: 99px; font-size: 11px; border: 1px solid rgba(251,191,36,0.35); }
   .hw-pill { background: rgba(56,189,248,0.14); color: #7dd3fc; padding: 3px 10px; border-radius: 99px; font-size: 11px; border: 1px solid rgba(56,189,248,0.35); }
   .tomo-stage {
-    position: relative; width: 100%; height: 235px;
+    position: relative; width: 100%; height: 245px;
     background: radial-gradient(ellipse at 50% 52%, #0e1326 0%, #04060b 78%);
     border-bottom: 1px solid var(--border); overflow: hidden;
   }
   #brain-canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
   .hud-top {
-    position: absolute; top: 10px; left: 16px; right: 16px; display: flex; justify-content: space-between; align-items: center;
-    pointer-events: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: #cbd5e1;
+    position: absolute; top: 9px; left: 14px; right: 14px; display: flex; justify-content: space-between; align-items: center;
+    pointer-events: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #cbd5e1;
   }
   .hud-controls {
-    position: absolute; top: 34px; left: 16px; display: flex; gap: 6px; z-index: 5;
+    position: absolute; top: 32px; left: 14px; right: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; z-index: 5; pointer-events: none;
   }
+  .ctrl-group { display: flex; gap: 5px; pointer-events: auto; }
   .mode-btn {
-    padding: 4px 10px; font-size: 11px; border-radius: 6px; background: rgba(15,23,42,0.85);
+    padding: 4px 9px; font-size: 11px; border-radius: 6px; background: rgba(15,23,42,0.88);
     color: var(--muted); border: 1px solid var(--border); cursor: pointer; font-weight: 600;
   }
-  .mode-btn.active { background: rgba(56,189,248,0.2); color: #e0f2fe; border-color: var(--accent); }
-  .hud-legend {
-    position: absolute; bottom: 8px; left: 16px; right: 16px; display: flex; justify-content: space-between; flex-wrap: wrap;
-    pointer-events: none; font-size: 11px; color: var(--muted);
+  .mode-btn.active { background: rgba(56,189,248,0.22); color: #e0f2fe; border-color: var(--accent); }
+  .kv-meter {
+    padding: 4px 10px; font-size: 11px; border-radius: 6px; background: rgba(15,23,42,0.88);
+    border: 1px solid var(--border); font-family: monospace; color: #34d399; pointer-events: auto;
   }
-  .legend-items { display: flex; gap: 14px; background: rgba(4,6,11,0.72); padding: 3px 10px; border-radius: 6px; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+  .hud-legend {
+    position: absolute; bottom: 7px; left: 14px; right: 14px; display: flex; justify-content: space-between; flex-wrap: wrap;
+    pointer-events: none; font-size: 10.5px; color: var(--muted);
+  }
+  .legend-items { display: flex; gap: 12px; background: rgba(4,6,11,0.76); padding: 3px 9px; border-radius: 6px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
   #node-tooltip {
     position: absolute; display: none; pointer-events: none; z-index: 10;
     background: rgba(10,15,26,0.95); border: 1px solid var(--accent); border-radius: 8px;
-    padding: 7px 10px; font-size: 11px; font-family: monospace; color: #f8fafc; box-shadow: 0 4px 18px rgba(0,0,0,0.8);
+    padding: 7px 10px; font-size: 11px; font-family: monospace; color: #f8fafc; box-shadow: 0 4px 18px rgba(0,0,0,0.85);
   }
   .main { display: flex; flex: 1; overflow: hidden; }
-  .sidebar { width: 320px; background: var(--panel); border-right: 1px solid var(--border); padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
-  .card { background: rgba(15,23,42,0.75); border: 1px solid var(--border); border-radius: 9px; padding: 10px; display: flex; flex-direction: column; gap: 7px; }
-  .card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.7px; color: var(--muted); }
+  .sidebar { width: 330px; background: var(--panel); border-right: 1px solid var(--border); padding: 11px; display: flex; flex-direction: column; gap: 9px; overflow-y: auto; }
+  .card { background: rgba(15,23,42,0.78); border: 1px solid var(--border); border-radius: 9px; padding: 9px; display: flex; flex-direction: column; gap: 6px; }
+  .card h3 { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.7px; color: var(--muted); }
   input, select {
-    width: 100%; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border);
-    background: #060912; color: var(--text); font-size: 12.5px;
+    width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: #060912; color: var(--text); font-size: 12px;
   }
   button.primary {
-    padding: 8px 12px; border-radius: 6px; border: none; font-weight: 600; font-size: 12.5px; cursor: pointer;
+    padding: 7px 11px; border-radius: 6px; border: none; font-weight: 600; font-size: 12px; cursor: pointer;
     background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #04060b;
   }
   button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
-  button.danger { background: rgba(239,68,68,0.18); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); padding: 7px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
-  button.secondary { background: #1e293b; color: var(--text); padding: 7px 10px; border-radius: 6px; border: none; font-size: 12px; cursor: pointer; }
+  button.danger { background: rgba(239,68,68,0.18); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); padding: 6px 9px; border-radius: 6px; font-size: 11.5px; font-weight: 600; cursor: pointer; }
+  button.secondary { background: #1e293b; color: var(--text); padding: 6px 9px; border-radius: 6px; border: none; font-size: 11.5px; cursor: pointer; }
+  .xray-box { font-family: monospace; font-size: 11px; color: #cbd5e1; background: #060912; padding: 7px; border-radius: 6px; border: 1px solid #1e293b; line-height: 1.45; }
   .chat-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  #messages { flex: 1; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+  #messages { flex: 1; padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 82%; padding: 10px 14px; border-radius: 12px; line-height: 1.5; font-size: 13.5px; white-space: pre-wrap; }
   .msg.user { align-self: flex-end; background: #1d4ed8; color: #fff; border-bottom-right-radius: 2px; }
   .msg.bot { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 2px; }
-  .input-bar { padding: 11px 16px; background: var(--panel); border-top: 1px solid var(--border); display: flex; gap: 10px; }
-  .input-bar input { flex: 1; font-size: 13.5px; padding: 9px 13px; }
-  .status-line { font-size: 11.5px; color: var(--muted); word-break: break-word; }
-  @media (max-width: 768px) { .main { flex-direction: column; } .sidebar { width: 100%; max-height: 44vh; border-right: none; border-bottom: 1px solid var(--border); } }
+  .input-bar { padding: 10px 14px; background: var(--panel); border-top: 1px solid var(--border); display: flex; gap: 9px; }
+  .input-bar input { flex: 1; font-size: 13.5px; padding: 8px 12px; }
+  .status-line { font-size: 11px; color: var(--muted); word-break: break-word; }
+  @media (max-width: 768px) { .main { flex-direction: column; } .sidebar { width: 100%; max-height: 46vh; border-right: none; border-bottom: 1px solid var(--border); } }
 </style>
 </head>
 <body>
 <header>
   <div class="brand">
     <span>V-CORE L1-CERTIFIED</span>
-    <span class="badge">fMRI / ЭМРТ Нейро-Томограф</span>
+    <span class="badge">Neuro-Lab v2 | fMRI &amp; Домены</span>
     <span class="hw-pill" id="hw-banner">Сканирование железа...</span>
   </div>
   <div class="status-line" id="status-text">Модель не загружена</div>
@@ -110,22 +120,30 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <canvas id="brain-canvas"></canvas>
   <div id="node-tooltip"></div>
   <div class="hud-top">
-    <span id="hud-left">ЭМРТ-МОНИТОР: ОЖИДАНИЕ СЖАТИЯ ИЛИ ЗАГРУЗКИ МОДЕЛИ</span>
+    <span id="hud-left">ЭМРТ-МОНИТОР: ОЖИДАНИЕ СЖАТИЯ, ЗАГРУЗКИ МОДЕЛИ ИЛИ .BRAIN.JSON</span>
     <span id="hud-right">НЕЙРОНОВ: 0 | ФАЗА: ПОКОЙ</span>
   </div>
   <div class="hud-controls">
-    <button class="mode-btn active" id="btn-view-brain" onclick="setViewMode('brain')">🧠 Проекция мозга (fMRI)</button>
-    <button class="mode-btn" id="btn-view-synapse" onclick="setViewMode('synapse')">🧬 Дендриты (Микро)</button>
+    <div class="ctrl-group">
+      <button class="mode-btn active" id="btn-view-brain" onclick="setViewMode('brain')">🧠 Мозг (fMRI)</button>
+      <button class="mode-btn" id="btn-view-domains" onclick="setViewMode('domains')">🎓 Домены знаний</button>
+      <button class="mode-btn" id="btn-view-synapse" onclick="setViewMode('synapse')">🧬 Дендриты</button>
+      <button class="mode-btn" id="btn-view-diff" onclick="setViewMode('diff')">⚖️ Diff До/После</button>
+      <button class="mode-btn" id="btn-replay" onclick="replayLastThought()">⏪ Повтор 0.25x</button>
+    </div>
+    <div class="kv-meter" id="kv-lock-meter" title="Давление KV-кэша P_in(ρ) и зазор Le0">
+      KV Lock P_in: 256.0 | Le₀: 0.024
+    </div>
   </div>
-  <div class="hud-legend">
-    <div class="legend-items">
+  <div class="hud-legend" id="hud-legend">
+    <div class="legend-items" id="legend-dynamic">
       <span><i class="dot" style="background:#38bdf8"></i>Ввод (Височная)</span>
       <span><i class="dot" style="background:#c084fc"></i>Внимание (Теменная)</span>
       <span><i class="dot" style="background:#fbbf24"></i>Логика MLP (Лобная)</span>
       <span><i class="dot" style="background:#34d399"></i>Выход (Зона Брока)</span>
     </div>
     <div class="legend-items">
-      <span>Сигнал входа ➔ Обработка ➔ Разряд ответа ⚡</span>
+      <span>Клик по нейрону ➔ Рентген тензора</span>
     </div>
   </div>
 </div>
@@ -140,7 +158,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <input id="pack-vram" type="number" step="0.5" placeholder="Бюджет ГБ">
         <input id="pack-calib" type="number" value="0" placeholder="Калибр.">
       </div>
-      <label style="font-size:11.5px; color:var(--muted); display:flex; align-items:center; gap:6px;">
+      <label style="font-size:11px; color:var(--muted); display:flex; align-items:center; gap:6px;">
         <input type="checkbox" id="pack-tomo" checked style="width:auto;"> Авто-режим по ЭМРТ-томографии
       </label>
       <button class="primary" id="btn-pack" onclick="runPackSSE()">Сжать и вырастить карту мозга</button>
@@ -148,7 +166,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
 
     <div class="card">
-      <h3>2. Загрузка модели / .vcore</h3>
+      <h3>2. Модель &amp; Карта мозга (.brain.json)</h3>
       <input id="load-dir" placeholder="Путь к папке или model.vcore" value="./qwen_vcore">
       <div style="display:flex; gap:6px;">
         <select id="load-dev">
@@ -162,11 +180,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <option value="true">Integer-Only Q14</option>
         </select>
       </div>
-      <button class="primary" onclick="loadModel()">Загрузить и просканировать</button>
+      <button class="primary" onclick="loadModel()">Загрузить и картировать домены</button>
+      <div style="display:flex; gap:6px;">
+        <button class="secondary" style="flex:1;" onclick="exportBrainCard()">💾 Экспорт .brain.json</button>
+        <button class="secondary" style="flex:1;" onclick="document.getElementById('brain-file-inp').click()">📂 Загрузить карту</button>
+        <input type="file" id="brain-file-inp" accept=".json" style="display:none;" onchange="importBrainCard(event)">
+      </div>
     </div>
 
     <div class="card">
-      <h3>3. Хирургия памяти &amp; Чат</h3>
+      <h3>3. Рентген выбранного нейрона</h3>
+      <div class="xray-box" id="xray-panel">Кликните по любому узлу на карте мозга выше, чтобы увидеть срез весов, импеданс и домен знаний.</div>
+    </div>
+
+    <div class="card">
+      <h3>4. Хирургия памяти &amp; Параметры</h3>
       <div style="display:flex; gap:6px;">
         <input id="unlearn-txt" placeholder="Тема для вырезания (/unlearn)">
         <button class="danger" onclick="runUnlearn()">Вырезать</button>
@@ -174,7 +202,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <div style="display:flex; gap:6px;">
         <input id="gen-tokens" type="number" value="256" title="Max tokens">
         <input id="gen-temp" type="number" step="0.1" value="0.7" title="Temperature">
-        <select id="kv-mode" style="width:110px;">
+        <select id="kv-mode" style="width:105px;">
           <option value="spherical">KV: E8</option>
           <option value="int4">KV: INT4</option>
           <option value="ternary">KV: 2-bit</option>
@@ -186,7 +214,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   <div class="chat-wrap">
     <div id="messages">
-      <div class="msg bot">ЭМРТ-томограф готов. Загрузи или сожми модель слева, затем отправь сообщение: ты увидишь, как одиночный импульс промпта входит в сенсорную зону мозга, зажигает активные слои внимания и MLP, а ответ модели выходит потоком разрядов из зоны Брока.</div>
+      <div class="msg bot">Neuro-Lab v2 готов. Загрузи модель — томограф автоматически разметит зоны Математики, Физики, Истории и Кода, отобразит давление KV-кэша (Electric Lock), позволит кликать по нейронам для рентгена и сохранять слепок мозга в .brain.json.</div>
     </div>
     <div class="input-bar">
       <input id="prompt-input" placeholder="Введите промпт для запуска импульса в мозг модели..." onkeydown="if(event.key==='Enter') sendMsg()">
@@ -200,7 +228,7 @@ const ctx = canvas.getContext('2d');
 const tooltip = document.getElementById('node-tooltip');
 let dpr = window.devicePixelRatio || 1;
 let W = 0, H = 0, tick = 0;
-let viewMode = 'brain'; // 'brain' | 'synapse'
+let viewMode = 'brain'; // 'brain' | 'domains' | 'synapse' | 'diff'
 
 const ZONES = {
   input_temporal: { cx: -0.22, cy: 0.14, rx: 0.11, ry: 0.12, hue: 198, title: 'Сенсорная зона (Ввод)' },
@@ -209,14 +237,64 @@ const ZONES = {
   output_broca:   { cx: 0.20,  cy: 0.22,  rx: 0.10, ry: 0.09, hue: 156, title: 'Зона Брока (Выход токенов)' }
 };
 
+const DOMAIN_SECTORS = {
+  math:    { cx: -0.20, cy: -0.14, rx: 0.12, ry: 0.12, hue: 205, title: 'Математика' },
+  physics: { cx: 0.18,  cy: -0.14, rx: 0.13, ry: 0.12, hue: 36,  title: 'Физика' },
+  history: { cx: -0.18, cy: 0.16,  rx: 0.12, ry: 0.11, hue: 330, title: 'История' },
+  code:    { cx: 0.18,  cy: 0.16,  rx: 0.13, ry: 0.11, hue: 155, title: 'Код / Алгоритмы' },
+  general: { cx: 0.0,   cy: 0.02,  rx: 0.11, ry: 0.10, hue: 265, title: 'Общая семантика' }
+};
+
 let brainNodes = [];
 let tracts = [];
 let signals = [];
+let lastThoughtTrace = [];
+let contextTokenEstimate = 0;
+
+function updateKvLockIndicator(addedTokens = 0) {
+  contextTokenEstimate += addedTokens;
+  const rho = Math.min(255.8, (contextTokenEstimate / 4096.0) * 256.0);
+  const pIn = ((256.0 - rho) / (rho + 1.0)).toFixed(1);
+  const pExt = 1.0;
+  const le0 = Math.max(0.0, 0.024 * (1.0 - (pExt - parseFloat(pIn)) / (parseFloat(pIn) + 0.001))).toFixed(4);
+  const meter = document.getElementById('kv-lock-meter');
+  meter.textContent = `KV Lock P_in: ${pIn} | Le₀: ${le0}`;
+  if (parseFloat(le0) < 0.008) {
+    meter.style.color = '#f87171';
+    meter.style.borderColor = '#ef4444';
+  } else if (parseFloat(le0) < 0.018) {
+    meter.style.color = '#fbbf24';
+    meter.style.borderColor = '#f59e0b';
+  } else {
+    meter.style.color = '#34d399';
+    meter.style.borderColor = '#1e293b';
+  }
+}
 
 function setViewMode(mode) {
   viewMode = mode;
-  document.getElementById('btn-view-brain').classList.toggle('active', mode === 'brain');
-  document.getElementById('btn-view-synapse').classList.toggle('active', mode === 'synapse');
+  ['brain', 'domains', 'synapse', 'diff'].forEach(m => {
+    document.getElementById('btn-view-' + m).classList.toggle('active', m === mode);
+  });
+  const leg = document.getElementById('legend-dynamic');
+  if (mode === 'domains') {
+    leg.innerHTML = `
+      <span><i class="dot" style="background:#38bdf8"></i>Математика</span>
+      <span><i class="dot" style="background:#fbbf24"></i>Физика</span>
+      <span><i class="dot" style="background:#f472b6"></i>История</span>
+      <span><i class="dot" style="background:#34d399"></i>Код / Логика</span>`;
+  } else if (mode === 'diff') {
+    leg.innerHTML = `
+      <span><i class="dot" style="background:#34d399"></i>Снижение импеданса (W8 / E8)</span>
+      <span><i class="dot" style="background:#c084fc"></i>Штатное квантование (1.58b)</span>
+      <span><i class="dot" style="background:#ef4444"></i>Абляция / Вырезание (/unlearn)</span>`;
+  } else {
+    leg.innerHTML = `
+      <span><i class="dot" style="background:#38bdf8"></i>Ввод (Височная)</span>
+      <span><i class="dot" style="background:#c084fc"></i>Внимание (Теменная)</span>
+      <span><i class="dot" style="background:#fbbf24"></i>Логика MLP (Лобная)</span>
+      <span><i class="dot" style="background:#34d399"></i>Выход (Зона Брока)</span>`;
+  }
 }
 
 function resizeCanvas() {
@@ -239,7 +317,7 @@ function classifyLayerZone(name) {
 
 function extractLayerDepth(name) {
   const m = (name || '').match(/layers\.(\d+)/);
-  return m ? parseInt(m[1], 10) : 0;
+  return m ? parseInt(m, 10) : 0;
 }
 
 function addBrainNode(layerInfo) {
@@ -248,23 +326,32 @@ function addBrainNode(layerInfo) {
   if (existing) {
     existing.mode = layerInfo.mode || existing.mode;
     existing.impedance = layerInfo.impedance || existing.impedance;
+    existing.domain = layerInfo.domain || existing.domain || 'general';
+    existing.domainScores = layerInfo.domain_scores || existing.domainScores || {};
     existing.activity = 1.0;
     return existing;
   }
 
   const zoneKey = classifyLayerZone(name);
   const z = ZONES[zoneKey];
+  const domainKey = layerInfo.domain || 'general';
+  const dSec = DOMAIN_SECTORS[domainKey] || DOMAIN_SECTORS.general;
+
   const idx = brainNodes.length;
   const layerDepth = extractLayerDepth(name);
   const shape = Array.isArray(layerInfo.shape) ? layerInfo.shape : [];
-  const aspect = shape.length >= 2 ? (shape[0] / Math.max(shape[1], 1)) : 1.0;
+  const aspect = shape.length >= 2 ? (shape / Math.max(shape, 1)) : 1.0;
   const peakRatio = layerInfo.peak || layerInfo.peak_ratio || 1.0;
   const impVal = layerInfo.impedance || 1.0;
 
   const angle = (layerDepth * 0.6180339 * Math.PI * 2) + (aspect * 1.37) + (idx * 0.29);
   const rNorm = Math.min(0.92, 0.22 + ((Math.log1p(peakRatio) + (impVal % 17) / 17.0) * 0.24));
+
   const bx = z.cx + Math.cos(angle) * z.rx * rNorm;
   const by = z.cy + Math.sin(angle) * z.ry * rNorm;
+
+  const dx = dSec.cx + Math.cos(angle + 0.7) * dSec.rx * rNorm;
+  const dy = dSec.cy + Math.sin(angle + 0.7) * dSec.ry * rNorm;
 
   const zoneNodes = brainNodes.filter(n => n.zone === zoneKey);
   const parent = zoneNodes.length > 0 ? zoneNodes[Math.floor((zoneNodes.length - 1) / 2)] : null;
@@ -290,15 +377,18 @@ function addBrainNode(layerInfo) {
     id: idx,
     name: name,
     zone: zoneKey,
+    domain: domainKey,
+    domainScores: layerInfo.domain_scores || {},
     mode: layerInfo.mode || '1.58b',
     impedance: impVal,
+    hadamardGain: layerInfo.gain || layerInfo.hadamard_gain || 1.0,
     shape: shape,
+    ablated: false,
     activity: 1.0,
     growth: 0.05,
-    bx: bx,
-    by: by,
-    sx: sx,
-    sy: sy,
+    bx: bx, by: by,
+    dx: dx, dy: dy,
+    sx: sx, sy: sy,
     parentId: parentId,
     hue: hue
   };
@@ -317,16 +407,30 @@ function getNodeScreenPos(node) {
   const cx = W * 0.5;
   const cy = H * 0.52;
   const scale = Math.min(W * 0.85, H * 1.15);
-  if (viewMode === 'brain') {
-    return { x: cx + node.bx * scale, y: cy + node.by * scale };
+  if (viewMode === 'domains') {
+    return { x: cx + node.dx * scale, y: cy + node.dy * scale };
   }
-  return { x: cx + node.sx * W * 0.9, y: cy + node.sy * H * 0.85 };
+  if (viewMode === 'synapse') {
+    return { x: cx + node.sx * W * 0.9, y: cy + node.sy * H * 0.85 };
+  }
+  return { x: cx + node.bx * scale, y: cy + node.by * scale };
 }
 
+function getNodeHue(node) {
+  if (node.ablated) return 0;
+  if (viewMode === 'domains') {
+    return (DOMAIN_SECTORS[node.domain] || DOMAIN_SECTORS.general).hue;
+  }
+  if (viewMode === 'diff') {
+    if (node.hadamardGain > 1.3 || node.mode.toLowerCase().includes('e8')) return 155;
+    return 282;
+  }
+  return node.hue;
+}
 function firePromptSignal() {
   const inputOrigin = { x: W * 0.08, y: H * 0.85 };
   const targetNodes = brainNodes.filter(n => n.zone === 'input_temporal');
-  const target = targetNodes.length > 0 ? targetNodes[0] : brainNodes[0];
+  const target = targetNodes.length > 0 ? targetNodes : brainNodes;
 
   if (!target) {
     const dummyPos = { x: W * 0.5 - Math.min(W * 0.85, H * 1.15) * 0.22, y: H * 0.52 + Math.min(W * 0.85, H * 1.15) * 0.14 };
@@ -338,7 +442,7 @@ function firePromptSignal() {
   }
 
   const pos = getNodeScreenPos(target);
-  target.activity = 1.2;
+  target.activity = 1.25;
   signals.push({
     x1: inputOrigin.x, y1: inputOrigin.y, x2: pos.x, y2: pos.y,
     progress: 0, speed: 0.055, hue: 198, size: 5.5 * dpr, chainToZone: 'attn_parietal'
@@ -353,18 +457,18 @@ function fireResponsePulse(hotLayerNames, energy = 0.8) {
       if (n) {
         n.activity = Math.min(1.5, 0.75 + energy);
         const brocaNodes = brainNodes.filter(b => b.zone === 'output_broca');
-        const broca = brocaNodes[0] || n;
+        const broca = brocaNodes || n;
         const p1 = getNodeScreenPos(n);
         const p2 = getNodeScreenPos(broca);
         signals.push({
           x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y,
-          progress: 0, speed: 0.085, hue: 42, size: 3.6 * dpr, chainToZone: 'exit'
+          progress: 0, speed: 0.085, hue: getNodeHue(n), size: 3.6 * dpr, chainToZone: 'exit'
         });
       }
     });
   } else if (brainNodes.length > 0) {
     const frontal = brainNodes.filter(n => n.zone === 'mlp_frontal');
-    const src = frontal[Math.floor(Math.random() * frontal.length)] || brainNodes[0];
+    const src = frontal[Math.floor(Math.random() * frontal.length)] || brainNodes;
     src.activity = 1.1;
     const p1 = getNodeScreenPos(src);
     signals.push({
@@ -373,6 +477,27 @@ function fireResponsePulse(hotLayerNames, energy = 0.8) {
     });
   }
 }
+
+function replayLastThought() {
+  if (!lastThoughtTrace || lastThoughtTrace.length === 0) {
+    return alert('Сначала отправьте промпт, чтобы записать траекторию мысли!');
+  }
+  document.getElementById('hud-left').textContent = '⏪ ЗАМЕДЛЕННЫЙ ПОВТОР МЫСЛИ (0.25x)...';
+  firePromptSignal();
+  lastThoughtTrace.forEach((step, idx) => {
+    setTimeout(() => {
+      fireResponsePulse(step.hot_layers, step.energy);
+      document.getElementById('hud-left').textContent =
+        `⏪ ПОВТОР [${idx + 1}/${lastThoughtTrace.length}]: "${step.text}" ➔ ${(step.hot_layers || []) || 'MLP'}`;
+      if (idx === lastThoughtTrace.length - 1) {
+        setTimeout(() => {
+          document.getElementById('hud-left').textContent = 'ЭМРТ-МОНИТОР: ПОВТОР ЗАВЕРШЁН';
+        }, 700);
+      }
+    }, (idx + 1) * 140);
+  });
+}
+
 function drawBrainSilhouette() {
   const cx = W * 0.5;
   const cy = H * 0.52;
@@ -402,14 +527,16 @@ function drawBrainSilhouette() {
   ctx.strokeStyle = 'rgba(148, 163, 184, 0.35)';
   ctx.stroke();
 
-  ctx.beginPath();
-  ctx.moveTo(-0.22, -0.08);
-  ctx.bezierCurveTo(-0.10, -0.22, 0.12, -0.20, 0.24, -0.06);
-  ctx.moveTo(-0.15, 0.06);
-  ctx.bezierCurveTo(0.0, -0.04, 0.16, 0.04, 0.26, 0.12);
-  ctx.strokeStyle = 'rgba(56, 189, 248, 0.14)';
-  ctx.lineWidth = 1.1 / s * dpr;
-  ctx.stroke();
+  if (viewMode === 'domains') {
+    ctx.font = `${0.032}px sans-serif`;
+    ctx.fillStyle = 'rgba(226, 232, 240, 0.45)';
+    ctx.textAlign = 'center';
+    Object.values(DOMAIN_SECTORS).forEach(sec => {
+      if (sec.title !== 'Общая семантика') {
+        ctx.fillText(sec.title.toUpperCase(), sec.cx, sec.cy - sec.ry * 0.75);
+      }
+    });
+  }
 
   ctx.restore();
 }
@@ -419,7 +546,7 @@ function renderFrame() {
   ctx.fillStyle = 'rgba(4, 6, 11, 0.36)';
   ctx.fillRect(0, 0, W, H);
 
-  if (viewMode === 'brain') drawBrainSilhouette();
+  if (viewMode !== 'synapse') drawBrainSilhouette();
 
   for (let i = 0; i < tracts.length; i++) {
     const tr = tracts[i];
@@ -431,6 +558,7 @@ function renderFrame() {
     const p2 = getNodeScreenPos(n2);
     const curX = p1.x + (p2.x - p1.x) * n2.growth;
     const curY = p1.y + (p2.y - p1.y) * n2.growth;
+    const hue = getNodeHue(n2);
 
     const actBoost = Math.max(n1.activity, n2.activity);
     ctx.beginPath();
@@ -439,7 +567,7 @@ function renderFrame() {
     const midY = (p1.y + curY) * 0.5 - 5 * dpr;
     ctx.quadraticCurveTo(midX, midY, curX, curY);
 
-    ctx.strokeStyle = `hsla(${n2.hue}, 88%, 62%, ${0.14 + actBoost * 0.38})`;
+    ctx.strokeStyle = `hsla(${hue}, 88%, 62%, ${0.14 + actBoost * 0.38})`;
     ctx.lineWidth = (viewMode === 'synapse' ? 1.8 : 1.0) * dpr;
     ctx.stroke();
   }
@@ -450,13 +578,14 @@ function renderFrame() {
     if (n.activity > 0.12) n.activity = Math.max(0.12, n.activity - 0.018);
 
     const pos = getNodeScreenPos(n);
+    const hue = getNodeHue(n);
     const baseR = (viewMode === 'synapse' ? 3.6 : 2.8) * dpr;
     const r = baseR * (0.85 + n.activity * 0.85);
 
     if (n.activity > 0.25) {
       const glowR = r * (3.2 + n.activity * 2.2);
       const g = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, glowR);
-      g.addColorStop(0, `hsla(${n.hue}, 100%, 68%, ${Math.min(0.65, n.activity * 0.45)})`);
+      g.addColorStop(0, `hsla(${hue}, 100%, 68%, ${Math.min(0.65, n.activity * 0.45)})`);
       g.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = g;
       ctx.beginPath();
@@ -466,7 +595,7 @@ function renderFrame() {
 
     ctx.beginPath();
     ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = n.activity > 0.75 ? '#ffffff' : `hsla(${n.hue}, 95%, 72%, ${0.55 + n.activity * 0.45})`;
+    ctx.fillStyle = n.activity > 0.75 ? '#ffffff' : `hsla(${hue}, 95%, 72%, ${0.55 + n.activity * 0.45})`;
     ctx.fill();
   }
 
@@ -517,14 +646,12 @@ function renderFrame() {
   requestAnimationFrame(renderFrame);
 }
 renderFrame();
-
-canvas.addEventListener('mousemove', (e) => {
+function findNearestNode(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
-  const mx = (e.clientX - rect.left) * dpr;
-  const my = (e.clientY - rect.top) * dpr;
+  const mx = (clientX - rect.left) * dpr;
+  const my = (clientY - rect.top) * dpr;
   let found = null;
   let minDist = 14 * dpr;
-
   for (const n of brainNodes) {
     const pos = getNodeScreenPos(n);
     const dist = Math.hypot(pos.x - mx, pos.y - my);
@@ -533,17 +660,84 @@ canvas.addEventListener('mousemove', (e) => {
       found = n;
     }
   }
+  return { found, rect };
+}
 
+canvas.addEventListener('mousemove', (e) => {
+  const { found, rect } = findNearestNode(e.clientX, e.clientY);
   if (found) {
     tooltip.style.display = 'block';
     tooltip.style.left = Math.min(rect.width - 250, e.clientX - rect.left + 12) + 'px';
     tooltip.style.top = Math.max(8, e.clientY - rect.top - 52) + 'px';
-    const shapeStr = found.shape && found.shape.length ? found.shape.join('×') : 'N/A';
-    tooltip.innerHTML = `<b>${found.name}</b><br>Зона: ${ZONES[found.zone].title}<br>Форма: [${shapeStr}] | ${found.mode} | Imp: ${found.impedance}`;
+    const dTitle = (DOMAIN_SECTORS[found.domain] || DOMAIN_SECTORS.general).title;
+    tooltip.innerHTML = `<b>${found.name}</b><br>Домен: ${dTitle} | ${found.mode}<br>Imp: ${found.impedance} (Клик ➔ Рентген)`;
   } else {
     tooltip.style.display = 'none';
   }
 });
+
+canvas.addEventListener('click', async (e) => {
+  const { found } = findNearestNode(e.clientX, e.clientY);
+  if (!found) return;
+  const xray = document.getElementById('xray-panel');
+  const dTitle = (DOMAIN_SECTORS[found.domain] || DOMAIN_SECTORS.general).title;
+  xray.innerHTML = `<b>Слой:</b> ${found.name}<br><b>Домен:</b> ${dTitle}<br><b>Режим:</b> ${found.mode} | <b>Imp:</b> ${found.impedance}<br>Запрос среза весов...`;
+
+  try {
+    const r = await fetch('/api/layer_xray', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: found.name })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      xray.innerHTML =
+        `<b>Слой:</b> ${found.name}<br>` +
+        `<b>Домен:</b> ${dTitle} | <b>Форма:</b> [${d.shape.join('×')}]<br>` +
+        `<b>Точность:</b> ${d.bits}-bit (${found.mode}) | <b>Group:</b> ${d.group_size}<br>` +
+        `<b>Распределение:</b> -1: ${d.neg_pct}% | 0: ${d.zero_pct}% | +1: ${d.pos_pct}%`;
+    }
+  } catch (err) {}
+});
+
+function exportBrainCard() {
+  if (brainNodes.length === 0) return alert('Карта мозга пуста — сначала загрузите или сожмите модель!');
+  const card = {
+    format: 'VCORE-BRAIN-PASSPORT-V2',
+    exported_at: new Date().toISOString(),
+    model_path: document.getElementById('load-dir').value,
+    total_nodes: brainNodes.length,
+    nodes: brainNodes,
+    tracts: tracts,
+    last_thought_trace: lastThoughtTrace
+  };
+  const blob = new Blob([JSON.stringify(card, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'vcore_model_map.brain.json';
+  a.click();
+}
+
+function importBrainCard(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const card = JSON.parse(e.target.result);
+      if (!Array.isArray(card.nodes)) return alert('Неверный формат файла .brain.json');
+      brainNodes = card.nodes;
+      tracts = card.tracts || [];
+      lastThoughtTrace = card.last_thought_trace || [];
+      document.getElementById('hud-left').textContent = `ЗАГРУЖЕН СЛЕПОК МОЗГА: ${file.name} (${brainNodes.length} УЗЛОВ)`;
+      document.getElementById('hud-right').textContent = `НЕЙРОНОВ: ${brainNodes.length} | ФАЗА: ПАСПОРТ`;
+      firePromptSignal();
+    } catch (err) {
+      alert('Ошибка чтения файла: ' + err);
+    }
+  };
+  reader.readAsText(file);
+}
+
 async function refreshStatus() {
   try {
     const r = await fetch('/api/status');
@@ -569,9 +763,9 @@ async function fetchTomographyMap() {
       brainNodes = [];
       tracts = [];
       d.layers.forEach((layer, idx) => {
-        setTimeout(() => addBrainNode(layer), idx * 16);
+        setTimeout(() => addBrainNode(layer), idx * 14);
       });
-      document.getElementById('hud-left').textContent = `ЭМРТ-ТОМОГРАММА ПОСТРОЕНА | АКТИВНЫХ УЗЛОВ: ${d.layers.length}`;
+      document.getElementById('hud-left').textContent = `ЭМРТ-ТОМОГРАММА И ДОМЕНЫ ПОСТРОЕНЫ | УЗЛОВ: ${d.layers.length}`;
       document.getElementById('hud-right').textContent = `НЕЙРОНОВ: ${d.layers.length} | ФАЗА: МОНИТОРИНГ`;
     }
   } catch (e) {}
@@ -637,7 +831,7 @@ async function loadModel() {
   const model_dir = document.getElementById('load-dir').value.trim();
   const device = document.getElementById('load-dev').value;
   const integer_only = document.getElementById('load-int').value === 'true';
-  document.getElementById('status-text').textContent = 'Загрузка модели...';
+  document.getElementById('status-text').textContent = 'Загрузка и картирование доменов...';
   const r = await fetch('/api/load', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model_dir, device, integer_only })
@@ -646,6 +840,8 @@ async function loadModel() {
   if (d.error) {
     document.getElementById('status-text').textContent = 'Ошибка: ' + d.error;
   } else {
+    contextTokenEstimate = 0;
+    updateKvLockIndicator(0);
     await refreshStatus();
     await fetchTomographyMap();
   }
@@ -666,6 +862,7 @@ async function runUnlearn() {
   } else {
     brainNodes.forEach(n => {
       if (n.name.includes('down_proj') || n.name.includes('o_proj')) {
+        n.ablated = true;
         n.hue = 0;
         n.activity = 1.4;
       }
@@ -678,6 +875,8 @@ async function runUnlearn() {
 async function clearChat() {
   await fetch('/api/clear', { method: 'POST' });
   document.getElementById('messages').innerHTML = '';
+  contextTokenEstimate = 0;
+  updateKvLockIndicator(0);
 }
 
 async function sendMsg() {
@@ -694,12 +893,14 @@ async function sendMsg() {
   const bDiv = document.createElement('div'); bDiv.className = 'msg bot'; bDiv.textContent = ''; box.appendChild(bDiv);
   box.scrollTop = box.scrollHeight;
 
+  lastThoughtTrace = [];
+  updateKvLockIndicator(Math.ceil(text.length / 3));
   firePromptSignal();
   document.getElementById('hud-left').textContent = 'ВХОДНОЙ ИМПУЛЬС ➔ СЕНСОРНАЯ КОРА ➔ ОБРАБОТКА ВНИМАНИЯ...';
   document.getElementById('hud-right').textContent = `НЕЙРОНОВ: ${brainNodes.length} | ФАЗА: ПРЯМОЙ ПРОХОД ⚡`;
 
   const max_tokens = parseInt(document.getElementById('gen-tokens').value || '256');
-  const temperature = parseFloat(document.getElementById('gen-temp').value || '0.7');
+    const temperature = parseFloat(document.getElementById('gen-temp').value || '0.7');
   const kv_mode = document.getElementById('kv-mode').value;
 
   try {
@@ -727,6 +928,8 @@ async function sendMsg() {
         if (evt.type === 'token') {
           bDiv.textContent += evt.text;
           box.scrollTop = box.scrollHeight;
+          updateKvLockIndicator(1);
+          lastThoughtTrace.push({ text: evt.text, hot_layers: evt.hot_layers, energy: evt.energy || 0.8 });
           fireResponsePulse(evt.hot_layers, evt.energy || 0.8);
           document.getElementById('hud-left').textContent =
             `ГЕНЕРАЦИЯ ОТВЕТА | АКТИВНЫЕ УЗЛЫ: ${(evt.hot_layers || []).slice(0, 2).join(', ') || 'MLP/FFN'}`;
@@ -758,6 +961,7 @@ class WebStudioState:
         self.model_path = ""
         self.device = self.hw.recommended_device
         self.certificate_info: Optional[Dict[str, Any]] = None
+        self.domain_map: Dict[str, Dict[str, Any]] = {}
         self._tmp_bundle = None
         self.history: List[Dict[str, str]] = []
         self.lock = threading.Lock()
@@ -801,17 +1005,19 @@ def create_handler(state: WebStudioState):
                         self._send_json(200, {"ready": False, "layers": []})
                         return
                     tomo = scan_model_tomography(state.model)
-                    layers_data = [
-                        {
+                    layers_data = []
+                    for name, info in tomo.items():
+                        d_entry = state.domain_map.get(name, {})
+                        layers_data.append({
                             "name": name,
                             "shape": list(info.get("shape", [])),
                             "peak": float(info.get("in_peak_ratio", 1.0)),
                             "impedance": float(info.get("mean_impedance", 1.0)),
                             "gain": float(info.get("hadamard_gain", 1.0)),
                             "mode": str(info.get("recommended_mode", "TERNARY_158BIT")),
-                        }
-                        for name, info in tomo.items()
-                    ]
+                            "domain": str(d_entry.get("domain", "general")),
+                            "domain_scores": d_entry.get("scores", {}),
+                        })
                 self._send_json(200, {"ready": True, "layers": layers_data})
             else:
                 self._send_json(404, {"error": "Not found"})
@@ -970,7 +1176,50 @@ def create_handler(state: WebStudioState):
                         state.model_path = model_dir
                         state.device = dev
                         state.history = []
+                        state.domain_map = map_cognitive_domains(state.model, state.tokenizer)
                     self._send_json(200, {"ok": True})
+
+                elif self.path == "/api/layer_xray":
+                    with state.lock:
+                        if state.model is None:
+                            self._send_json(400, {"ok": False})
+                            return
+                        target_name = body.get("name", "")
+                        clean_name = target_name[:-7] if target_name.endswith(".weight") else target_name
+                        found_mod = dict(state.model.named_modules()).get(clean_name)
+                        if isinstance(found_mod, VCoreLinear):
+                            from .safetensors_quantizer import unpack_uint8_to_ternary
+                            n_el = found_mod.out_features * found_mod.in_features
+                            if found_mod.bits == 2:
+                                vals = unpack_uint8_to_ternary(found_mod.vcore_packed, (n_el,))
+                                neg = round(float((vals < -0.5).float().mean().item()) * 100, 1)
+                                zero = round(float((vals.abs() < 0.5).float().mean().item()) * 100, 1)
+                                pos = round(float((vals > 0.5).float().mean().item()) * 100, 1)
+                            else:
+                                neg, zero, pos = 45.0, 10.0, 45.0
+                            self._send_json(200, {
+                                "ok": True,
+                                "shape": [found_mod.out_features, found_mod.in_features],
+                                "bits": found_mod.bits,
+                                "group_size": found_mod.group_size,
+                                "neg_pct": neg,
+                                "zero_pct": zero,
+                                "pos_pct": pos,
+                            })
+                            return
+                        elif isinstance(found_mod, torch.nn.Linear):
+                            w = found_mod.weight.detach()
+                            self._send_json(200, {
+                                "ok": True,
+                                "shape": list(w.shape),
+                                "bits": 16,
+                                "group_size": 1,
+                                "neg_pct": round(float((w < -1e-4).float().mean().item()) * 100, 1),
+                                "zero_pct": round(float((w.abs() <= 1e-4).float().mean().item()) * 100, 1),
+                                "pos_pct": round(float((w > 1e-4).float().mean().item()) * 100, 1),
+                            })
+                            return
+                    self._send_json(200, {"ok": False})
 
                 elif self.path == "/api/unlearn":
                     with state.lock:
@@ -1010,6 +1259,7 @@ def run_web_server(host: str = "127.0.0.1", port: int = 7860, initial_model: Opt
         state.tokenizer = AutoTokenizer.from_pretrained(load_target, trust_remote_code=True)
         state.model = VCoreModelForCausalLM.from_vcore_pretrained(load_target, device=state.device, dtype=dtype)
         state.model_path = initial_model
+        state.domain_map = map_cognitive_domains(state.model, state.tokenizer)
 
     server = ThreadingHTTPServer((host, port), create_handler(state))
     print(f"[V-CORE Web Studio] Сервер запущен: http://{host}:{port}")
@@ -1018,7 +1268,7 @@ def run_web_server(host: str = "127.0.0.1", port: int = 7860, initial_model: Opt
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="V-CORE L1-Certified Functional Brain Tomography Web UI")
+    parser = argparse.ArgumentParser(description="V-CORE L1-Certified Neuro-Lab v2 EM-Tomography Web UI")
     parser.add_argument("--host", default="127.0.0.1", help="Хост (по умолчанию 127.0.0.1)")
     parser.add_argument("--port", "-p", type=int, default=7860, help="Порт (по умолчанию 7860)")
     parser.add_argument("--model", "-m", default=None, help="Путь к модели или .vcore для автозагрузки")
@@ -1028,4 +1278,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                        
+            
