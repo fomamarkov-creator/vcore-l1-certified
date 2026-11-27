@@ -270,6 +270,11 @@ vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_tomo --tomogra
 #   /scan                  -> Inspect per-layer & per-head EM-Tomography map
 #   /unlearn <concept>     -> Surgically ablate targeted knowledge via Null-Space projection
 ```
+  - **Neuro-Lab v2 Cognitive Mapping & Passport Export (`.brain.json`):**
+    - **Domain Specialization (`map_cognitive_domains` / `/domains`):** Automatically maps transformer layers into **Mathematics**, **Physics**, **History**, and **Code** sectors via differential $\ell_1$ activation profiling upon model load.
+    - **KV Electric Lock Telemetry ($P_{\text{in}}(\rho)$ & $Le_0$):** Monitors context saturation pressure $P_{\text{in}}(\rho) = \frac{256 - \rho}{\rho + 1}$ in real time across both Web UI and TUI.
+    - **Layer X-Ray, Slow-Motion Replay & Brain Passports:** Inspect per-layer ternary/INT4 weight distributions on click (or via `/xray <layer>`), replay the last inference impulse chain (`/replay` or `0.25x` in browser), and export/load portable neural topology snapshots (`/export-brain model.brain.json`).
+    - 
 - **Functional Brain EM-Tomography Studio (`vcore-web` & `vcore-ui`):**
   - **Real-Time Layer-by-Layer Neurogenesis (SSE):** During model compression (`vcore-web` or `/pack` in `vcore-ui`), each quantized layer (`E8`, `1.58-bit`, `INT4`, `FP16`) grows its own topologically unique node and axonal tract in real time inside a 4-lobe brain projection (*Sensory/Temporal*, *Attention/Parietal*, *Logic MLP/Frontal*, *Output/Broca*).
   - **Live fMRI Signal Propagation:** During prompt prefill and token streaming, lightweight forward hooks capture per-layer $\ell_1$ activation spikes—visualizing the input pulse entering the sensory cortex, propagating through attention/MLP pathways, and firing response impulses out of Broca's area synchronously with each generated token.
