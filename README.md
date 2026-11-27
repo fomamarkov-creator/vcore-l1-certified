@@ -228,6 +228,7 @@ Convert any V-CORE compressed model directory directly into a `.gguf` file (`TQ2
 vcore-export-gguf --input ./qwen25_vcore --output ./qwen25_vcore.gguf
 ```
 # Or compress from Hugging Face Hub and export to GGUF in a single command
+```
 vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_vcore --max-rel-error 0.22 --export-gguf ./qwen15_vcore.gguf
 ```
 ### 6. Interactive Terminal Studio (`vcore-ui`), Wave Web UI (`vcore-web`) & Standalone C++ Runner (`vcore-run`)
@@ -262,13 +263,13 @@ vcore-serve --model ./qwen2.5-1.5b.vcore --port 8000
 vcore-pack --input ./Qwen2.5-VL-3B --output ./qwen_vl_vcore --vlm --bundle ./qwen_vl.vcore
 
 # Train from scratch or fine-tune with QAT-LoRA directly over 1.58-bit / E8 lattices
-
+```
 vcore-train --model Qwen/Qwen2.5-1.5B --data ./train.jsonl --output ./qwen_qat --mode e8 --epochs 2
 ```
 # Run paired cold-cache A/B benchmark (FP32 vs BitNet vs V-CORE 1.58-bit vs Sub-1-Bit E8 LUT)
 
-vcore-bench --hidden-size 4096 --out-size 4096 --steps 30 --ab-compare
-
+```vcore-bench --hidden-size 4096 --out-size 4096 --steps 30 --ab-compare
+```
 ## Citation
 
 If you use **V-CORE (ℓ₁)-Certified** or the **Lean 4 ℓ₁-Projection Complexity** formal verification library in your research or software, please cite:
@@ -285,6 +286,6 @@ If you use **V-CORE (ℓ₁)-Certified** or the **Lean 4 ℓ₁-Projection Compl
 ```
 # Zero-Copy mmap execution of a single-file .vcore bundle directly in native C++17 / AVX2 (with Lean 4 Passport check)
 
-./build/vcore-run --model ./qwen2.5-1.5b.vcore --prompt "Explain L1 median quantization." --tokens 64 --integer-only
-
+```.build/vcore-run --model ./qwen2.5-1.5b.vcore --prompt "Explain L1 median quantization." --tokens 64 --integer-only
+```
 
