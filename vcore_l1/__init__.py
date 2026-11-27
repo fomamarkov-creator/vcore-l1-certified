@@ -118,6 +118,19 @@ from .resonance_scanner import (
     generate_resonance_plot,
 )
 
+from .resonance_scanner import (
+    get_white_rabbit_alpha,
+    get_dynamic_leeway,
+    get_markov_impedance,
+    scan_resonance_range,
+    text_to_matrix_coord,
+    MarkovMatrixAnalyzer,
+    compute_tensor_resonance_impedance,
+    find_optimal_resonant_scale,
+    scan_model_tomography,
+    surgical_unlearn_concept,
+    generate_resonance_plot,
+)
 
 __version__ = "8.0.0"
 __all__ = [
@@ -215,4 +228,5 @@ __all__ = [
     "build_e8_draft_model",
     "generate_model_card_readme",
     "publish_vcore_to_hub",
+    "surgical_unlearn_concept",
 ]
