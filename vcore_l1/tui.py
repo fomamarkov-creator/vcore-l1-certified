@@ -54,6 +54,7 @@ class VCoreTerminalStudio:
             "  /load <путь_к_папке_или_.vcore> [--integer-only]\n"
             "                        — Загрузить сжатую модель или единый бандл .vcore с паспортом Lean 4\n"
             "  /hw                   — Показать профиль железа и активный C-ABI бэкенд\n"
+            "  /scan                 — ЭМРТ-томограмма весов загруженной модели (резонанс слоёв)\n"
             "  /clear                — Очистить историю диалога\n"
             "  /settings             — Показать текущие параметры генерации\n"
             "  /tokens <N>           — Установить лимит новых токенов\n"
@@ -143,7 +144,23 @@ class VCoreTerminalStudio:
         if gguf_out and os.path.isdir(dst):
             g_stats = export_vcore_to_gguf(dst, gguf_out)
             print(f"=== GGUF ЭКСПОРТ ({gguf_out}) === {g_stats}")
-
+            
+    def cmd_scan(self):
+        if self.model is None:
+            print("[!] Сначала загрузите модель командой /load <папка_модели_или_.vcore>\n")
+            return
+        from .resonance_scanner import scan_model_tomography
+        tomo = scan_model_tomography(self.model)
+        print(f"\n=== ЭМРТ-ТОМОГРАММА МОДЕЛИ ({len(tomo)} слоёв) ===")
+        for l_name, info in list(tomo.items())[:15]:
+            print(
+                f"  {l_name:<42} | PeakRatio={info['in_peak_ratio']:>5.1f} | "
+                f"Imp={info['mean_impedance']:>5.1f} | GainW8={info['hadamard_gain']:>4.2f} -> {info['recommended_mode']}"
+            )
+        if len(tomo) > 15:
+            print(f"  ... и ещё {len(tomo) - 15} слоёв.")
+        print()
+        
     def chat_turn(self, user_text: str):
         if self.model is None or self.tokenizer is None:
             print("[!] Сначала загрузите модель командой /load <папка_модели_или_.vcore>\n")
@@ -210,6 +227,8 @@ class VCoreTerminalStudio:
                 elif cmd == "/hw":
                     print(f"[HW-DISPATCH] {self.hw.summary_banner()}")
                     print(f"[ABI-BACKEND] Active native kernel: {self.dispatcher.active_backend_name()}")
+                elif cmd == "/scan":
+                    self.cmd_scan()
                 elif cmd == "/clear":
                     self.history = []
                     print("[V-CORE] История диалога очищена.")
