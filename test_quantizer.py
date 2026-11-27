@@ -18,6 +18,11 @@ from vcore_l1 import (
     solve_triple_overlap_fpt,
     quantize_ternary_triangular_feedback,
     MARKOV_LE0_GAP,
+    MARKOV_ZERO_INVERSION,
+    MARKOV_LOCK_THRESHOLD,
+    hcp12_isotropic_smooth,
+    compute_pore_equilibrium,
+    VCoreQATLinear,
     fwht_4,
     fwht_8,
     fwht_16,
@@ -48,13 +53,9 @@ from vcore_l1 import (
     export_vcore_bundle,
     unpack_vcore_bundle_to_temp,
     repack_vlm_model,
-    decompose_to_dyadic_vnodes
-    MARKOV_ZERO_INVERSION,
-    MARKOV_LOCK_THRESHOLD,
-    hcp12_isotropic_smooth,
-    compute_pore_equilibrium,
-    VCoreQATLinear,
+    decompose_to_dyadic_vnodes,
 )
+
 
 
 def absmean_bitnet_quantize(weights: torch.Tensor) -> torch.Tensor:
