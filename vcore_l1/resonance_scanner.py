@@ -391,7 +391,76 @@ def surgical_unlearn_concept(
         "strength": strength,
         "total_l1_energy_ablated": round(total_energy_removed, 4),
     }
-        
+@torch.no_grad()
+def map_cognitive_domains(
+    model: torch.nn.Module,
+    tokenizer: Any,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Функциональное ЭМРТ-картирование когнитивных доменов модели:
+    определяет доминантную специализацию каждого слоя (math, physics, history, code)
+    по дифференциальному отклику L1-энергии активаций относительно нейтрального фона.
+    """
+    from .inference_layer import VCoreLinear
+
+    domain_prompts = {
+        "neutral": "The weather today is calm and clear across the region.",
+        "math": "Theorem proof integral eigenvalues differential equation topology algebra.",
+        "physics": "Quantum mechanics thermodynamics Navier-Stokes electromagnetic field velocity.",
+        "history": "Ancient civilization empire revolution treaty century dynasty archaeology.",
+        "code": "Algorithm function compiler memory pointer tensor kernel asynchronous thread.",
+    }
+
+    device = next(model.parameters()).device
+    model.eval()
+
+    target_layers = {
+        name: mod
+        for name, mod in model.named_modules()
+        if isinstance(mod, (torch.nn.Linear, VCoreLinear))
+    }
+
+    responses: Dict[str, Dict[str, float]] = {k: {} for k in domain_prompts}
+
+    for domain, prompt_text in domain_prompts.items():
+        hooks = []
+
+        def _make_hook(d_key: str, l_name: str):
+            def _hook(_mod, _inp, out):
+                if isinstance(out, torch.Tensor):
+                    responses[d_key][l_name] = float(out.detach().abs().mean().item())
+            return _hook
+
+        for l_name, mod in target_layers.items():
+            hooks.append(mod.register_forward_hook(_make_hook(domain, f"{l_name}.weight")))
+
+        raw_toks = tokenizer(prompt_text, return_tensors="pt", truncation=True, max_length=64)
+        toks = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in raw_toks.items()}
+        _ = model(**toks)
+
+        for h in hooks:
+            h.remove()
+
+    domain_map: Dict[str, Dict[str, Any]] = {}
+    base = responses["neutral"]
+    for l_name in base:
+        b_val = max(base.get(l_name, 1e-6), 1e-6)
+        scores = {}
+        for d_key in ("math", "physics", "history", "code"):
+            d_val = responses[d_key].get(l_name, b_val)
+            scores[d_key] = round((d_val - b_val) / b_val, 4)
+
+        best_domain = max(scores.items(), key=lambda x: x)[0]
+        if scores[best_domain] <= 0.01:
+            best_domain = "general"
+
+        domain_map[l_name] = {
+            "domain": best_domain,
+            "scores": scores,
+        }
+
+    return domain_map
+                    
 
 # =========================================================================
 # 3. ВИЗУАЛИЗАЦИЯ ЭНЕРГЕТИЧЕСКИХ ЯМ (ОПЦИОНАЛЬНО, ЕСЛИ УСТАНОВЛЕН MATPLOTLIB)
