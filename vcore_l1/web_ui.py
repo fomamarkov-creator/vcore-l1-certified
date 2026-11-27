@@ -317,8 +317,9 @@ function classifyLayerZone(name) {
 
 function extractLayerDepth(name) {
   const m = (name || '').match(/layers\.(\d+)/);
-  return m ? parseInt(m, 10) : 0;
+  return m ? parseInt(m[1], 10) : 0;
 }
+
 
 function addBrainNode(layerInfo) {
   const name = layerInfo.name || `layer_${brainNodes.length}`;
@@ -340,7 +341,7 @@ function addBrainNode(layerInfo) {
   const idx = brainNodes.length;
   const layerDepth = extractLayerDepth(name);
   const shape = Array.isArray(layerInfo.shape) ? layerInfo.shape : [];
-  const aspect = shape.length >= 2 ? (shape / Math.max(shape, 1)) : 1.0;
+  const aspect = shape.length >= 2 ? (shape[0] / Math.max(shape[1], 1)) : 1.0;
   const peakRatio = layerInfo.peak || layerInfo.peak_ratio || 1.0;
   const impVal = layerInfo.impedance || 1.0;
 
@@ -430,7 +431,7 @@ function getNodeHue(node) {
 function firePromptSignal() {
   const inputOrigin = { x: W * 0.08, y: H * 0.85 };
   const targetNodes = brainNodes.filter(n => n.zone === 'input_temporal');
-  const target = targetNodes.length > 0 ? targetNodes : brainNodes;
+  const target = targetNodes.length > 0 ? targetNodes[0] : brainNodes[0];
 
   if (!target) {
     const dummyPos = { x: W * 0.5 - Math.min(W * 0.85, H * 1.15) * 0.22, y: H * 0.52 + Math.min(W * 0.85, H * 1.15) * 0.14 };
@@ -457,7 +458,7 @@ function fireResponsePulse(hotLayerNames, energy = 0.8) {
       if (n) {
         n.activity = Math.min(1.5, 0.75 + energy);
         const brocaNodes = brainNodes.filter(b => b.zone === 'output_broca');
-        const broca = brocaNodes || n;
+        const broca = brocaNodes[0] || n;
         const p1 = getNodeScreenPos(n);
         const p2 = getNodeScreenPos(broca);
         signals.push({
@@ -468,6 +469,8 @@ function fireResponsePulse(hotLayerNames, energy = 0.8) {
     });
   } else if (brainNodes.length > 0) {
     const frontal = brainNodes.filter(n => n.zone === 'mlp_frontal');
+    const src = frontal[Math.floor(Math.random() * frontal.length)] || brainNodes[0];
+
     const src = frontal[Math.floor(Math.random() * frontal.length)] || brainNodes;
     src.activity = 1.1;
     const p1 = getNodeScreenPos(src);
@@ -488,7 +491,7 @@ function replayLastThought() {
     setTimeout(() => {
       fireResponsePulse(step.hot_layers, step.energy);
       document.getElementById('hud-left').textContent =
-        `⏪ ПОВТОР [${idx + 1}/${lastThoughtTrace.length}]: "${step.text}" ➔ ${(step.hot_layers || []) || 'MLP'}`;
+        `⏪ ПОВТОР [${idx + 1}/${lastThoughtTrace.length}]: "${step.text}" ➔ ${(step.hot_layers || [])[0] || 'MLP'}`;
       if (idx === lastThoughtTrace.length - 1) {
         setTimeout(() => {
           document.getElementById('hud-left').textContent = 'ЭМРТ-МОНИТОР: ПОВТОР ЗАВЕРШЁН';
