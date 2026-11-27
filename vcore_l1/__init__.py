@@ -49,6 +49,9 @@ from .super_quantizer import (
     MARKOV_N_BASE,
     MARKOV_ZETA_RATIO,
     MARKOV_LE0_GAP,
+    MARKOV_ZERO_INVERSION,
+    MARKOV_LOCK_THRESHOLD,
+    hcp12_isotropic_smooth,
     fwht_4,
     fwht_8,
     get_3hcp_codebook,
@@ -73,6 +76,7 @@ from .v4_engine import (
     quantize_barnes_wall32_lattice,
     VCoreLUTLinear,
     MixedLatticeAssignment,
+    compute_pore_equilibrium,
     allocate_mixed_lattice,
     certify_transformer_block_e2e,
     verify_rope_key_drift,
@@ -102,7 +106,7 @@ from .streaming_cache import VCoreStreamingCache
 from .speculative import VCoreSpeculativeGenerator, build_e8_draft_model
 from .hub_publisher import generate_model_card_readme, publish_vcore_to_hub
 
-__version__ = "5.0.0"
+__version__ = "8.0.0"
 __all__ = [
     "VCoreTernaryQuantizer",
     "verify_with_lean4_engine",
@@ -148,6 +152,9 @@ __all__ = [
     "MARKOV_N_BASE",
     "MARKOV_ZETA_RATIO",
     "MARKOV_LE0_GAP",
+    "MARKOV_ZERO_INVERSION",
+    "MARKOV_LOCK_THRESHOLD",
+    "hcp12_isotropic_smooth",
     "fwht_4",
     "fwht_8",
     "fwht_16",
@@ -165,6 +172,7 @@ __all__ = [
     "VCoreInDomainHadamardLinear",
     "VCoreLUTLinear",
     "MixedLatticeAssignment",
+    "compute_pore_equilibrium",
     "allocate_mixed_lattice",
     "certify_transformer_block_e2e",
     "verify_rope_key_drift",
