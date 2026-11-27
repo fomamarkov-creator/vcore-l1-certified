@@ -54,6 +54,7 @@ class VCoreTerminalStudio:
             "  /load <путь_к_папке_или_.vcore> [--integer-only]\n"
             "                        — Загрузить сжатую модель или единый бандл .vcore с паспортом Lean 4\n"
             "  /hw                   — Показать профиль железа и активный C-ABI бэкенд\n"
+            "  /unlearn <фраза>      — Точечно вырезать знание/тему из весов модели (ЭМРТ + Null-Space)\n"
             "  /scan                 — ЭМРТ-томограмма весов загруженной модели (резонанс слоёв)\n"
             "  /clear                — Очистить историю диалога\n"
             "  /settings             — Показать текущие параметры генерации\n"
@@ -160,8 +161,24 @@ class VCoreTerminalStudio:
         if len(tomo) > 15:
             print(f"  ... и ещё {len(tomo) - 15} слоёв.")
         print()
-
         
+    def cmd_unlearn(self, concept_text: str):
+        if self.model is None or self.tokenizer is None:
+            print("[!] Сначала загрузите модель командой /load <папка_модели_или_.vcore>\n")
+            return
+        if not concept_text.strip():
+            print("Использование: /unlearn <фраза или тема для вырезания>\n")
+            return
+        from .resonance_scanner import surgical_unlearn_concept
+        print(f"[V-CORE ЭМРТ] Поиск и ортогональное вырезание паттерна: '{concept_text}'...")
+        res = surgical_unlearn_concept(self.model, self.tokenizer, target_prompts=[concept_text], strength=0.85)
+        self.history = []
+        print(
+            f"[V-CORE ЭМРТ] Вырезано из {res['edited_layers']} слоёв "
+            f"(удалено L1-энергии: {res['total_l1_energy_ablated']}). История чата сброшена.\n"
+        )
+
+          
     def chat_turn(self, user_text: str):
         if self.model is None or self.tokenizer is None:
             print("[!] Сначала загрузите модель командой /load <папка_модели_или_.vcore>\n")
@@ -230,6 +247,8 @@ class VCoreTerminalStudio:
                     print(f"[ABI-BACKEND] Active native kernel: {self.dispatcher.active_backend_name()}")
                 elif cmd == "/scan":
                     self.cmd_scan()
+                elif cmd == "/unlearn":
+                    self.cmd_unlearn(user_in[len("/unlearn"):].strip())    
                 elif cmd == "/clear":
                     self.history = []
                     print("[V-CORE] История диалога очищена.")
