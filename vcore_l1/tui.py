@@ -152,7 +152,7 @@ class VCoreTerminalStudio:
             right_txt = side_panel[idx] if idx < len(side_panel) else ""
             print("  " + "".join(out) + "   " + right_txt)
         print()
-            def load_model(self, model_dir: str, integer_only: bool = None):
+    def load_model(self, model_dir: str, integer_only: bool = None):
         if integer_only is not None:
             self.integer_only = integer_only
 
@@ -357,7 +357,7 @@ class VCoreTerminalStudio:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(card, f, ensure_ascii=False, indent=2)
         print(f"[V-CORE] Паспорт мозга ({len(nodes)} узлов) сохранён в '{path}'.\n")
-                def cmd_replay(self):
+    def cmd_replay(self):
         if not self.last_thought_trace:
             print("[!] Сначала отправьте запрос в чат, чтобы записать траекторию импульсов.\n")
             return
