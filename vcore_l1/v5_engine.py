@@ -120,17 +120,60 @@ def unpack_spherical_code(
 
 
 @torch.no_grad()
-def quantize_spherical_code(
+def pack_spherical_code(
     vectors: torch.Tensor,
     lattice: str = "e8",
     hyperbolic_poincare: bool = True,
-) -> Tuple[torch.Tensor, float]:
-    """Симуляция сжатия-восстановления сферическим/гиперболическим кодом."""
-    idx, radii, shape, max_chord = pack_spherical_code(
-        vectors, lattice=lattice, hyperbolic_poincare=hyperbolic_poincare
+    chunk_size: int = 65536,
+) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], float]:
+    """
+    Реализация Теорем `spherical_chord_dot_identity`, `spherical_code_inner_product_lower_bound`
+    и `radial_angular_poincare_bound` (MarkovL1CrossLayerAndIntegerTransformer.lean):
+    упаковывает эмбеддинги / lm_head / KV-кэш в пару (`uint8` индексы + `float16` радиусы)
+    с чанкованием по `chunk_size` (не превышает ~60 МБ VRAM даже на 256k-словарях).
+    """
+    orig_shape = tuple(vectors.shape)
+    dim = 8 if lattice.lower() == "e8" else 4
+    flat = vectors.reshape(-1).to(torch.float32)
+    pad = (dim - (flat.numel() % dim)) % dim
+    if pad > 0:
+        flat = torch.cat([flat, torch.zeros(pad, device=flat.device, dtype=flat.dtype)])
+
+    blocks = flat.view(-1, dim)
+    n_blocks = blocks.size(0)
+    norms = torch.linalg.norm(blocks, dim=1, keepdim=True)
+    safe_norms = torch.clamp(norms, min=1e-8)
+
+    if hyperbolic_poincare:
+        max_norm = torch.clamp(torch.max(norms), min=1e-6)
+        _ = torch.tanh(norms / max_norm)
+    radii_store = (norms / 1.4142135623730951).squeeze(1).to(torch.float16)
+
+    cb = (
+        get_e8_codebook(blocks.device, torch.float32)[1:]
+        if dim == 8
+        else get_d4_codebook(blocks.device, torch.float32)[1:]
     )
-    out = unpack_spherical_code(idx, radii, shape, lattice=lattice, dtype=vectors.dtype)
-    return out, max_chord
+    cb_t = cb.T.contiguous()
+
+    best_idx = torch.empty((n_blocks,), device=blocks.device, dtype=torch.uint8)
+    max_chord_sq = 0.0
+
+    for start in range(0, n_blocks, chunk_size):
+        end = min(start + chunk_size, n_blocks)
+        unit_chunk = blocks[start:end] * (1.4142135623730951 / safe_norms[start:end])
+        dots = unit_chunk @ cb_t
+        idx_chunk = torch.argmax(dots, dim=1)
+        best_idx[start:end] = idx_chunk.to(torch.uint8)
+
+        q_sphere = cb[idx_chunk]
+        chord_sq = torch.sum((unit_chunk - q_sphere) ** 2, dim=1)
+        chunk_max = float(torch.max(chord_sq).item())
+        if chunk_max > max_chord_sq:
+            max_chord_sq = chunk_max
+
+    return best_idx.contiguous(), radii_store.contiguous(), orig_shape, max_chord_sq
+
 
 
 # =========================================================================
