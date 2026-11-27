@@ -9,7 +9,7 @@
 # V-CORE (ℓ₁)-Certified v4.0: Sub-1-Bit Lattice (Λ₃₂ / Λ₂₄ / E₈ / D₄), LUT Kernels & Verified GPU/CPU Quantization Engine
 
 
-A complete symbolic-numeric compression and inference runtime combining a **machine-checked 26-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v7.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
+A complete symbolic-numeric compression and inference runtime combining a **machine-checked 27-module Lean 4 formal verification core** (`l1-projection-complexity-lean4`, `v8.0.0`) with **sub-1-bit root-lattice vector quantization (`E₈` 0.99 b/w, `D₄` 1.16 b/w, `3HCP` 1.23 b/w, Leech `Λ₂₄` 0.73 b/w)**, **multiplier-free in-domain Walsh–Hadamard (`H₄` / `W₈`) inference**, **data-free `ℓ₁`-LoRA residual compensation**, **hardware 2:4 structured sparsity**, **MoE Top-K routing safety**, **$O(n^2)$ Freivalds inference certificates**, and **warp-parallel CUDA / AVX2 kernels**.
 
 
 
@@ -22,7 +22,7 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
 ## Full Stack Capabilities
 
 1. **Formal Lean 4 Verification (`CertifierMain.lean` → `vcore_certifier`):**
-   * Links directly against all 21 verified modules of `l1-projection-complexity-lean4` (`v5.0.0`)—including `MarkovL1TernaryQuantizer`, `MarkovL1WeightedTernary`, and `MarkovL1TreewidthSolver`, 'MarkovL1ContinuousChainDP','MarkovL1TriangularActivation','MarkovL1GeneralTreewidthFPT'—to certify exact-rational (\(\mathbb{Q}\)) optimality prior to GPU execution,`MarkovL1FullTransformerCert` (32D `W₃₂` / `Λ₃₂` cascade, LUT kernel soundness, Mixed-Lattice budget, and E2E Transformer block drift bounds), and `MarkovL1RoPEAndGolaySyndrome` (exact-rational Cayley RoPE phase drift bounds and $O(1)$ Golay `G₂₄` syndrome linearity).
+   * Links directly against all 27 verified modules of `l1-projection-complexity-lean4` (`v8.0.0`)—including `MarkovL1TernaryQuantizer`, `MarkovL1WeightedTernary`, and `MarkovL1TreewidthSolver`, 'MarkovL1ContinuousChainDP','MarkovL1TriangularActivation','MarkovL1GeneralTreewidthFPT'—to certify exact-rational (\(\mathbb{Q}\)) optimality prior to GPU execution,`MarkovL1FullTransformerCert` (32D `W₃₂` / `Λ₃₂` cascade, LUT kernel soundness, Mixed-Lattice budget, and E2E Transformer block drift bounds), and `MarkovL1RoPEAndGolaySyndrome` (exact-rational Cayley RoPE phase drift bounds and $O(1)$ Golay `G₂₄` syndrome linearity).
 
 2. **Activation-Weighted \(\ell_1\) Medians, Treewidth FPT & Channel Outlier Grouping (`vcore_l1/`):**
    * Sorts weight columns by \(\ell_1\)-norm (`vcore_perm`) to isolate heavy-tailed outliers into dedicated Δ = 1 blocks.
@@ -67,6 +67,14 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
    * **Unbounded Dyadic `VNode` Reduction (`decompose_to_dyadic_vnodes`, `VCORE-LOGIC-MARKOV-EFIM-2026`):** Decomposes extreme outlier channels into symbolic `(base, exp, offset)` dyadic nodes with Lean 4 verified 2-step mass contraction (`MarkovL1DyadicVNodeReduction.lean`, Module 26) and embeds the cryptographic-mathematical stamp into every `.vcore` bundle.
    * **Paired Alternating A/B Benchmark (`vcore-bench`):** Evaluates `FP32` vs. `BitNet (absmean)` vs. `V-CORE 1.58-bit` vs. `V-CORE Sub-1-Bit E8 LUT` using alternating execution order (`A->B` / `B->A`) and explicit cache clearing to eliminate warm-cache bias.
    * 
+10. **V256 Lattice Upgrades (`MarkovL1V256Upgrades.lean`, Module 27 — `VCORE-V256-UPGRADES-MARKOV-EFIM-2026`):**
+    * **Dynamic KV-Cache Electric Lock (`electric_lock=True` in `VCoreDynamicCache`):** Monitors normalized attention pressure $P_{\text{in}}(\rho) = \frac{256 - \rho}{\rho + 1}$ and collapses clearance leeway ($Le_0 \to 0$) upon saturation ($P_{\text{in}} \le P_{\text{ext}}$), preventing key-value drift on long-context small GQA models (`0.5B`–`1.5B`).
+    * **Isotropic 12-Point `3HCP` Pre-Filter (`hcp12_isotropic_smooth`):** Zero-first-moment, isotropic second-moment ($\sum \delta^2 = 4$) lattice smoothing prior to `FWHT` rotations, eliminating systematic activation bias.
+    * **Analytic `125/192` Lock Threshold for 2:4 Sparsity (`fast_lock_prune=True` in `quantize_24_sparse_l1`):** Prunes sub-threshold blocks in $O(1)$ using the exact rational equatorial lock bound $\frac{16 - 12}{256 \cdot 0.024} = \frac{125}{192}$ prior to combinatorial mask evaluation.
+    * **Anisotropic $11\times$ MoE Routing & Pore Equilibrium (`anisotropic=True`, `compute_pore_equilibrium`):** Compresses non-critical (equatorial) routing channels by $11\times$ ($\chi_{xx} = 1/11$ vs. $\chi_{zz} = 1$) while preserving full Top-$K$ gate precision, and prioritizes mixed-lattice upgrades via pore balance $\Omega_{\text{pore}} = X / Y \approx 1$.
+    * **Parameter-Free $\mathbb{Z}/256\mathbb{Z}$ Modular QAT Reset (`apply_modular_plateau_reset`):** Wraps overflowing shadow weights ($|w| \ge 256$) back into the active dynamic range via modular register inversion ($256 \equiv 0$) during `vcore-train` optimization.
+    * 
+
 ---
 ![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
 
