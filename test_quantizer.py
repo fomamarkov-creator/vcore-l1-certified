@@ -327,10 +327,10 @@ def main():
         assert get_markov_impedance(77, 7) < 1e-12
         opt_sc, opt_imp = find_optimal_resonant_scale(torch.randn(8, 32))
         assert opt_sc.shape == (8,) and opt_imp.shape == (8,)
-            tomo = scan_model_tomography(
-        {"layers.0.self_attn.q_proj.weight": torch.randn(128, 128)},
-        activation_map={"layers.0.self_attn.q_proj.weight": torch.ones(128)},
-        head_dim=64,
+        tomo = scan_model_tomography(
+            {"layers.0.self_attn.q_proj.weight": torch.randn(128, 128)},
+            activation_map={"layers.0.self_attn.q_proj.weight": torch.ones(128)},
+            head_dim=64,
         )
         info_q = tomo["layers.0.self_attn.q_proj.weight"]
         assert info_q["contrast_enabled"] is True and info_q["hot_heads"] == "0/2" and "recommended_mode" in info_q
