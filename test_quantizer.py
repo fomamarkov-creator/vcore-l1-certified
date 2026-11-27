@@ -57,6 +57,7 @@ from vcore_l1 import (
     MarkovMatrixAnalyzer,
     get_markov_impedance,
     find_optimal_resonant_scale,
+    scan_model_tomography,
 )
 
 
@@ -319,12 +320,16 @@ def main():
         reset_cnt = qat_test.apply_modular_plateau_reset()
         assert reset_cnt == 1 and float(torch.abs(qat_test.weight[0, 0]).item()) < 256.0
 
-# Проверка модуля резонансного сканера (resonance_scanner.py)
+        # Проверка резонансного сканера и многоканального ЭМРТ-томографа весов
         analyzer = MarkovMatrixAnalyzer()
         assert analyzer.find_resonance(77) in (7, 11)
         assert get_markov_impedance(77, 7) < 1e-12
         opt_sc, opt_imp = find_optimal_resonant_scale(torch.randn(8, 32))
         assert opt_sc.shape == (8,) and opt_imp.shape == (8,)
+        tomo = scan_model_tomography({"layers.0.mlp.gate_proj.weight": torch.randn(32, 32)})
+        assert "layers.0.mlp.gate_proj.weight" in tomo and "recommended_mode" in tomo["layers.0.mlp.gate_proj.weight"]
+
+
         
     
     print(
