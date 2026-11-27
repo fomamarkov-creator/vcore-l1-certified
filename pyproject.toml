@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vcore-l1-certified"
-version = "5.0.0"
+version = "8.0.0"
 description = "V-CORE (L1)-Certified: Formally Verified (Lean 4) 1.58-bit, E8/Λ32 Lattice, Integer-Only Q14 & QAT Engine"
 readme = "README.md"
 requires-python = ">=3.9"
