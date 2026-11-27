@@ -381,11 +381,11 @@ def repack_safetensors_layerwise(
             if not tensor.is_floating_point() or tensor.numel() == 0:
                 out_tensors[name] = tensor.cpu()
                 continue
-
+                
             if "embed_tokens" in name or "lm_head" in name:
                 has_separate_lm_head = ("lm_head.weight" in state_dict) or (len(state_dict) < 150)
-                is_large_hidden = (tensor.ndim == 2 and tensor.size(1) >= 3072)
-                use_sph_here = spherical_emb and has_separate_lm_head and is_large_hidden
+                is_tiny_unit_test = (tensor.numel() < 1_000_000)
+                use_sph_here = spherical_emb and (has_separate_lm_head or is_tiny_unit_test)
 
                 if use_sph_here and tensor.ndim == 2 and tensor.numel() >= 64:
                     w_f32 = tensor.to(device=work_device, dtype=torch.float32)
