@@ -330,9 +330,9 @@ def main():
         {"layers.0.self_attn.q_proj.weight": torch.randn(128, 128)},
         activation_map={"layers.0.self_attn.q_proj.weight": torch.ones(128)},
         head_dim=64,
-    )
-    info_q = tomo["layers.0.self_attn.q_proj.weight"]
-    assert info_q["contrast_enabled"] is True and info_q["hot_heads"] == "0/2" and "recommended_mode" in info_q
+        )
+        info_q = tomo["layers.0.self_attn.q_proj.weight"]
+        assert info_q["contrast_enabled"] is True and info_q["hot_heads"] == "0/2" and "recommended_mode" in info_q
 
     
     print(
