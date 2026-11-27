@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import torch
 from safetensors.torch import load_file, save_file
 from .cuda_quantizer import VCoreTernaryQuantizer, _weighted_median_1d
