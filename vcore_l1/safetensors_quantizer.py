@@ -425,7 +425,7 @@ def repack_safetensors_layerwise(
 
         w_f32 = tensor.to(device=work_device, dtype=torch.float32)
 
-            if cross_layer_comp:
+        if cross_layer_comp:
             src_name = None
             if name.endswith(".self_attn.o_proj.weight"):
                 src_name = name.replace(".self_attn.o_proj.weight", ".self_attn.v_proj.weight")
