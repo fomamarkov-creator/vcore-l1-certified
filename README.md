@@ -74,6 +74,10 @@ A complete symbolic-numeric compression and inference runtime combining a **mach
     * **Anisotropic $11\times$ MoE Routing & Pore Equilibrium (`anisotropic=True`, `compute_pore_equilibrium`):** Compresses non-critical (equatorial) routing channels by $11\times$ ($\chi_{xx} = 1/11$ vs. $\chi_{zz} = 1$) while preserving full Top-$K$ gate precision, and prioritizes mixed-lattice upgrades via pore balance $\Omega_{\text{pore}} = X / Y \approx 1$.
     * **Parameter-Free $\mathbb{Z}/256\mathbb{Z}$ Modular QAT Reset (`apply_modular_plateau_reset`):** Wraps overflowing shadow weights ($|w| \ge 256$) back into the active dynamic range via modular register inversion ($256 \equiv 0$) during `vcore-train` optimization.
     * 
+11. **Multi-Channel Weight EM-Tomography & Surgical Knowledge Unlearning (`vcore_l1/resonance_scanner.py`, `--tomography`):**
+    * **4-Channel Weight EM-Tomography (`scan_model_tomography`):** Scans input channels (`Z_in`), output neurons (`Z_out`), per-head attention load (`q/k/v/o_proj`), and Walsh–Hadamard `W₈` spectral gain with optional activation contrast ($\gamma_j$) to assign per-layer quantization modes automatically (`vcore-pack --tomography` or `/scan` in `vcore-ui`).
+    * **Surgical Null-Space Unlearning (`surgical_unlearn_concept`, `/unlearn`):** Isolates concept-specific activation pathways via differential tomography and removes targeted knowledge ($W_{\text{clean}} = W - \alpha (W u) u^\top$) directly in quantized `VCoreLinear` or `FP16` weights without full retraining.
+    * 
 
 ---
 ![V-CORE vs BitNet Outlier Stress-Test](assets/outlier_benchmark.png)
@@ -256,6 +260,16 @@ vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_vcore --max-re
 ```
 ./build/vcore-run --model ./qwen15_vcore --prompt "Explain L1 median quantization." --tokens 64 --integer-only
 ```
+* **Tomography-Guided Compression & Surgical Unlearning (`--tomography`, `/scan`, `/unlearn`):**
+```bash
+# Auto-assign per-layer precision modes using 4-channel Weight EM-Tomography
+vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_tomo --tomography --bundle ./qwen15_tomo.vcore
+
+# Inside vcore-ui interactive chat:
+#   /scan                  -> Inspect per-layer & per-head EM-Tomography map
+#   /unlearn <concept>     -> Surgically ablate targeted knowledge via Null-Space projection
+```
+
 ### 7. One-Click Download, Hardware Auto-Pack & Chat (`vcore-pull`)
 ```bash
 # Automatically detects your GPU/CPU/VRAM, packs into a single .vcore bundle, and starts chat
