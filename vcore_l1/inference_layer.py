@@ -16,6 +16,7 @@ from .safetensors_quantizer import (
     pack_int4_to_uint8,
     unpack_uint8_to_int4,
 )
+from .super_quantizer import MARKOV_LAMBDA_LIMIT, MARKOV_LE0_GAP
 from .v5_engine import (
     integer_only_rmsnorm,
     pack_spherical_code,
@@ -78,24 +79,55 @@ _CPU_LIB = _load_cpu_lib()
 
 
 class VCoreKVCacheQuantizer:
-    """Сжатие KV-кэша на лету: 4-bit (INT4), 2-bit (Ternary) или сферические коды E₈ ('spherical')."""
+    """
+    Сжатие KV-кэша на лету: 4-bit (INT4), 2-bit (Ternary) или сферические коды E₈ ('spherical')
+    с динамическим Электрическим Замком (Module 27: `kv_cache_electric_lock_sound`).
+    """
 
-    def __init__(self, group_size: int = 32, theta: float = 1e-4, bits: int = 4, mode: str = "auto"):
+    def __init__(
+        self,
+        group_size: int = 32,
+        theta: float = 1e-4,
+        bits: int = 4,
+        mode: str = "auto",
+        electric_lock: bool = True,
+    ):
         self.group_size = group_size
         self.bits = bits
         self.mode = mode
+        self.electric_lock = electric_lock
         self.quantizer = VCoreTernaryQuantizer(group_size=group_size, theta=theta, auto_theta=True)
+
+    @staticmethod
+    def _apply_electric_lock_stabilizer(kv_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Применяет прерыватель давления P_in(ρ) = (256 - ρ)/(ρ + 1):
+        когда P_in <= P_ext (насыщение плотности активаций), зазор клиренса обнуляется,
+        подавляя накопление дрейфа на длинном контексте.
+        """
+        xf = kv_tensor.to(torch.float32)
+        max_val = torch.clamp(torch.max(torch.abs(xf)), min=1e-6)
+        rho = (torch.abs(xf) / max_val) * MARKOV_LAMBDA_LIMIT
+        p_in = (MARKOV_LAMBDA_LIMIT - rho) / (rho + 1.0)
+        p_ext = 1.0
+        leeway = torch.where(p_in > p_ext, torch.full_like(xf, MARKOV_LE0_GAP), torch.zeros_like(xf))
+        # Подавляем подпороговый шум в заблокированных ячейках (leeway == 0)
+        noise_floor = max_val * MARKOV_LE0_GAP * 0.25
+        stabilized = torch.where((leeway == 0.0) & (torch.abs(xf) < noise_floor), torch.zeros_like(xf), xf)
+        return stabilized.to(kv_tensor.dtype)
 
     @torch.no_grad()
     def compress_kv(self, kv_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...]]:
         orig_shape = tuple(kv_tensor.shape)
+        work_kv = self._apply_electric_lock_stabilizer(kv_tensor) if self.electric_lock else kv_tensor
+
         if self.mode == "spherical":
             sp_idx, sp_rad, shape, _ = pack_spherical_code(
-                kv_tensor, lattice="e8", hyperbolic_poincare=False
+                work_kv, lattice="e8", hyperbolic_poincare=False
             )
             return sp_idx, sp_rad, shape
 
-        flat = kv_tensor.reshape(-1).to(torch.float32)
+        flat = work_kv.reshape(-1).to(torch.float32)
         rem = flat.numel() % self.group_size
         if rem != 0:
             flat = torch.cat([flat, torch.zeros(self.group_size - rem, dtype=flat.dtype, device=flat.device)])
@@ -135,17 +167,16 @@ class VCoreKVCacheQuantizer:
             grid = unpack_uint8_to_int4(packed, (padded_len,)).to(packed.device)
         restored = (grid.reshape(-1, self.group_size) * scales.to(torch.float32).unsqueeze(1)).reshape(-1)
         return restored[:total_elems].reshape(orig_shape).to(dtype)
-
-
 class VCoreDynamicCache:
     """
     Совместимый с Hugging Face transformers (v4 и v5+) кэш генерации,
-    поддерживающий INT4, 2-bit L1 и сферические коды E₈ (`mode='spherical'`).
+    поддерживающий INT4, 2-bit L1, сферические коды E₈ (`mode='spherical'`)
+    и динамический Электрический Замок (`electric_lock=True`).
     """
     is_compileable = False
 
-    def __init__(self, group_size: int = 32, bits: int = 4, mode: str = "auto"):
-        self.kv_q = VCoreKVCacheQuantizer(group_size=group_size, bits=bits, mode=mode)
+    def __init__(self, group_size: int = 32, bits: int = 4, mode: str = "auto", electric_lock: bool = True):
+        self.kv_q = VCoreKVCacheQuantizer(group_size=group_size, bits=bits, mode=mode, electric_lock=electric_lock)
         self.key_cache: List[Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], torch.dtype]] = []
         self.value_cache: List[Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], torch.dtype]] = []
         self.layers: List[Any] = []
@@ -188,6 +219,8 @@ class VCoreDynamicCache:
         query_length = cache_position if isinstance(cache_position, int) else int(cache_position.shape)
         kv_length = self.get_seq_length(layer_idx) + query_length
         return kv_length, 0
+
+
 class VCoreSphericalEmbedding(nn.Module):
     """
     Сжатый слой nn.Embedding на гиперболических сферических кодах E₈:
@@ -266,7 +299,6 @@ class VCoreIntegerRMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return integer_only_rmsnorm(x, self.weight, eps=self.eps, newton_iters=4, frac_bits=14)
-
 
 class VCoreLinear(nn.Module):
     """
@@ -405,6 +437,7 @@ class VCoreLinear(nn.Module):
         bias_f32 = self.bias.to(torch.float32) if self.bias is not None else None
         out = F.linear(x_2d.to(torch.float32), w_restored, bias_f32).to(x.dtype)
         return out.reshape(*orig_shape[:-1], self.out_features)
+
 def inject_vcore_layers(
     model: nn.Module,
     state_dict: Dict[str, torch.Tensor],
@@ -526,5 +559,5 @@ class VCoreModelForCausalLM:
     ):
         return load_vcore_causal_lm(
             model_dir=model_dir, device=device, dtype=dtype, integer_only=integer_only
-                )
-            
+            )
+                
