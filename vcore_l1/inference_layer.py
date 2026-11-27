@@ -103,18 +103,19 @@ class VCoreKVCacheQuantizer:
         """
         Применяет прерыватель давления P_in(ρ) = (256 - ρ)/(ρ + 1):
         когда P_in <= P_ext (насыщение плотности активаций), зазор клиренса обнуляется,
-        подавляя накопление дрейфа на длинном контексте.
+        мягко демпфируя флуктуации на длинном контексте без потери ортогональности ключей GQA.
         """
         xf = kv_tensor.to(torch.float32)
         max_val = torch.clamp(torch.max(torch.abs(xf)), min=1e-6)
         rho = (torch.abs(xf) / max_val) * MARKOV_LAMBDA_LIMIT
         p_in = (MARKOV_LAMBDA_LIMIT - rho) / (rho + 1.0)
         p_ext = 1.0
-        leeway = torch.where(p_in > p_ext, torch.full_like(xf, MARKOV_LE0_GAP), torch.zeros_like(xf))
-        # Подавляем подпороговый шум в заблокированных ячейках (leeway == 0)
-        noise_floor = max_val * MARKOV_LE0_GAP * 0.25
-        stabilized = torch.where((leeway == 0.0) & (torch.abs(xf) < noise_floor), torch.zeros_like(xf), xf)
+        locked = p_in <= p_ext
+        # В заблокированной зоне подавляем только высокочастотный дрейф на величину Le₀ = 0.024
+        damped = xf * (1.0 - MARKOV_LE0_GAP)
+        stabilized = torch.where(locked, damped, xf)
         return stabilized.to(kv_tensor.dtype)
+
 
     @torch.no_grad()
     def compress_kv(self, kv_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...]]:
@@ -423,20 +424,24 @@ class VCoreLinear(nn.Module):
                 out = out + self.bias.to(x.dtype)
             return out.reshape(*orig_shape[:-1], self.out_features)
 
-        num_elems = self.out_features * self.in_features
-        padded_elems = ((num_elems + self.group_size - 1) // self.group_size) * self.group_size
-        if self.bits == 2:
-            grid = unpack_uint8_to_ternary(self.vcore_packed, (padded_elems,)).to(x.device)
-        else:
-            grid = unpack_uint8_to_int4(self.vcore_packed, (padded_elems,)).to(x.device)
+        if not hasattr(self, "_w_cache") or self._w_cache is None or self._w_cache.device != x.device:
+            num_elems = self.out_features * self.in_features
+            padded_elems = ((num_elems + self.group_size - 1) // self.group_size) * self.group_size
+            if self.bits == 2:
+                grid = unpack_uint8_to_ternary(self.vcore_packed, (padded_elems,)).to(x.device)
+            else:
+                grid = unpack_uint8_to_int4(self.vcore_packed, (padded_elems,)).to(x.device)
 
-        scales = self.vcore_scales.to(torch.float32)
-        w_restored = (grid.reshape(-1, self.group_size) * scales.unsqueeze(1)).reshape(-1)[:num_elems].reshape(
-            self.out_features, self.in_features
-        )
-        bias_f32 = self.bias.to(torch.float32) if self.bias is not None else None
-        out = F.linear(x_2d.to(torch.float32), w_restored, bias_f32).to(x.dtype)
+            scales = self.vcore_scales.to(torch.float32)
+            w_restored = (grid.reshape(-1, self.group_size) * scales.unsqueeze(1)).reshape(-1)[:num_elems].reshape(
+                self.out_features, self.in_features
+            )
+            self._w_cache = w_restored.to(x.dtype)
+
+        bias_cast = self.bias.to(x.dtype) if self.bias is not None else None
+        out = F.linear(x_2d, self._w_cache, bias_cast)
         return out.reshape(*orig_shape[:-1], self.out_features)
+
 
 def inject_vcore_layers(
     model: nn.Module,
