@@ -105,6 +105,17 @@ from .dyadic_vnode import (
 from .streaming_cache import VCoreStreamingCache
 from .speculative import VCoreSpeculativeGenerator, build_e8_draft_model
 from .hub_publisher import generate_model_card_readme, publish_vcore_to_hub
+from .resonance_scanner import (
+    get_white_rabbit_alpha,
+    get_dynamic_leeway,
+    get_markov_impedance,
+    scan_resonance_range,
+    text_to_matrix_coord,
+    MarkovMatrixAnalyzer,
+    compute_tensor_resonance_impedance,
+    find_optimal_resonant_scale,
+    generate_resonance_plot,
+)
 
 __version__ = "8.0.0"
 __all__ = [
