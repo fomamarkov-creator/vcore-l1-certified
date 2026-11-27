@@ -1,7 +1,7 @@
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 [![DOI](https://zenodo.org)](https://doi.org/10.5281/zenodo.24527692)
 
-* **Lean Core:** `l1-projection-complexity-lean4` (`v7.0.0` — **25 Verified Modules**, `0 sorry`s)
+* **Lean Core:** `l1-projection-complexity-lean4` (`v8.0.0` — **27 Verified Modules**, `0 sorry`s)
 * **Toolchain:** Lean `v4.37.0-rc1` 
 * **Backend:** PyTorch / Warp-CUDA (`sm_70`–`sm_90`) / Native AVX2 C++17
 * **License:** AGPL-3.0
