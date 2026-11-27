@@ -154,12 +154,13 @@ class VCoreTerminalStudio:
         print(f"\n=== ЭМРТ-ТОМОГРАММА МОДЕЛИ ({len(tomo)} слоёв) ===")
         for l_name, info in list(tomo.items())[:15]:
             print(
-                f"  {l_name:<42} | PeakRatio={info['in_peak_ratio']:>5.1f} | "
+                f"  {l_name:<38} | Peak={info['in_peak_ratio']:>5.1f} | Heads={info['hot_heads']:<5} | "
                 f"Imp={info['mean_impedance']:>5.1f} | GainW8={info['hadamard_gain']:>4.2f} -> {info['recommended_mode']}"
             )
         if len(tomo) > 15:
             print(f"  ... и ещё {len(tomo) - 15} слоёв.")
         print()
+
         
     def chat_turn(self, user_text: str):
         if self.model is None or self.tokenizer is None:
