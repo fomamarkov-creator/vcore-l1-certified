@@ -170,7 +170,7 @@ class VCoreTerminalStudio:
             gguf_shell = torch.nn.Module()
             for t in reader.tensors:
                 if len(t.shape) == 2:
-                    in_f, out_f = int(t.shape), int(t.shape)
+                    in_f, out_f = map(int, t.shape)
                     lin = torch.nn.Linear(in_f, out_f, bias=False)
                     arr = torch.tensor(t.data, dtype=torch.float32)
                     if arr.numel() == lin.weight.numel():
