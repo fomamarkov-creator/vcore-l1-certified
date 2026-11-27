@@ -58,6 +58,7 @@ from vcore_l1 import (
     get_markov_impedance,
     find_optimal_resonant_scale,
     scan_model_tomography,
+    surgical_unlearn_concept,
 )
 
 
@@ -333,6 +334,24 @@ def main():
         )
         info_q = tomo["layers.0.self_attn.q_proj.weight"]
         assert info_q["contrast_enabled"] is True and info_q["hot_heads"] == "0/2" and "recommended_mode" in info_q
+
+        # Проверка хирургического вырезания знаний (surgical_unlearn_concept)
+        class _TinyToyLM(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.emb = torch.nn.Embedding(32, 16)
+                self.down_proj = torch.nn.Linear(16, 16, bias=False)
+            def forward(self, input_ids, **kwargs):
+                return self.down_proj(self.emb(input_ids))
+
+        class _TinyTok:
+            def __call__(self, text, return_tensors="pt", truncation=True, max_length=128):
+                ids = torch.tensor([[min(ord(c) % 31 + 1, 31) for c in text[:8]] or [1]], dtype=torch.long)
+                return {"input_ids": ids}
+
+        toy_lm = _TinyToyLM()
+        unlearn_res = surgical_unlearn_concept(toy_lm, _TinyTok(), target_prompts=["secret password 42"])
+        assert unlearn_res["edited_layers"] == 1 and unlearn_res["total_l1_energy_ablated"] > 0.0
 
     
     print(
