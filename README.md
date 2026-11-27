@@ -268,7 +268,8 @@ vcore-train --model Qwen/Qwen2.5-1.5B --data ./train.jsonl --output ./qwen_qat -
 ```
 # Run paired cold-cache A/B benchmark (FP32 vs BitNet vs V-CORE 1.58-bit vs Sub-1-Bit E8 LUT)
 
-```vcore-bench --hidden-size 4096 --out-size 4096 --steps 30 --ab-compare
+```
+vcore-bench --hidden-size 4096 --out-size 4096 --steps 30 --ab-compare
 ```
 ## Citation
 
