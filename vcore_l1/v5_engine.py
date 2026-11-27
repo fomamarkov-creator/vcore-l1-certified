@@ -27,7 +27,7 @@ def apply_cross_layer_compensation(
     wh1 = w1_quant.to(torch.float32)
     w2 = w2_orig.to(torch.float32)
 
-    err1 = w1 - wh1  # (H, I)
+    err1 = w1 - wh1
     gram = wh1 @ wh1.T
     reg = 1e-4 * torch.trace(gram) / max(gram.size(0), 1)
     gram_reg = gram + reg * torch.eye(gram.size(0), device=gram.device, dtype=gram.dtype)
@@ -45,79 +45,6 @@ def apply_cross_layer_compensation(
 # =========================================================================
 # 2. СФЕРИЧЕСКИЕ И ГИПЕРБОЛИЧЕСКИЕ КОДЫ (EMBEDDINGS / LM_HEAD / KV-CACHE)
 # =========================================================================
-
-@torch.no_grad()
-def pack_spherical_code(
-    vectors: torch.Tensor,
-    lattice: str = "e8",
-    hyperbolic_poincare: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], float]:
-    """
-    Реализация Теорем `spherical_chord_dot_identity`, `spherical_code_inner_product_lower_bound`
-    и `radial_angular_poincare_bound` (MarkovL1CrossLayerAndIntegerTransformer.lean):
-    упаковывает эмбеддинги / lm_head / KV-кэш в пару:
-      - `indices` (`uint8`): индекс точки на единичной оболочке E₈ (240 вершин, 1.0 b/w) или D₄ (24 вершины);
-      - `radii` (`float16`): точный гиперболический / евклидов радиус каждого блока.
-    """
-    orig_shape = tuple(vectors.shape)
-    dim = 8 if lattice.lower() == "e8" else 4
-    flat = vectors.reshape(-1).to(torch.float32)
-    pad = (dim - (flat.numel() % dim)) % dim
-    if pad > 0:
-        flat = torch.cat([flat, torch.zeros(pad, device=flat.device, dtype=flat.dtype)])
-
-    blocks = flat.view(-1, dim)
-    norms = torch.linalg.norm(blocks, dim=1, keepdim=True)
-    safe_norms = torch.clamp(norms, min=1e-8)
-
-    # В шаре Пуанкаре радиальная глубина отделяется от углового направления (at-anh масштабирование)
-    if hyperbolic_poincare:
-        max_norm = torch.clamp(torch.max(norms), min=1e-6)
-        poincare_r = torch.tanh(norms / max_norm)
-        radii_store = (norms / 1.4142135623730951).squeeze(1).to(torch.float16)
-        _ = poincare_r
-    else:
-        radii_store = (norms / 1.4142135623730951).squeeze(1).to(torch.float16)
-
-    unit_blocks = blocks * (1.4142135623730951 / safe_norms)
-    cb = (
-        get_e8_codebook(blocks.device, torch.float32)[1:]
-        if dim == 8
-        else get_d4_codebook(blocks.device, torch.float32)[1:]
-    )
-
-    dots = unit_blocks @ cb.T
-    best_idx = torch.argmax(dots, dim=1)
-    q_sphere = cb[best_idx]
-
-    chord_sq = torch.sum((unit_blocks - q_sphere) ** 2, dim=1)
-    max_chord_sq = float(torch.max(chord_sq).item())
-
-    return best_idx.to(torch.uint8).contiguous(), radii_store.contiguous(), orig_shape, max_chord_sq
-
-
-@torch.no_grad()
-def unpack_spherical_code(
-    indices: torch.Tensor,
-    radii: torch.Tensor,
-    orig_shape: Tuple[int, ...],
-    lattice: str = "e8",
-    dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-    """Распаковывает упакованные сферические индексы `uint8` и радиусы `float16` обратно в тензор."""
-    dim = 8 if lattice.lower() == "e8" else 4
-    total_elems = 1
-    for d in orig_shape:
-        total_elems *= d
-
-    cb = (
-        get_e8_codebook(indices.device, torch.float32)[1:]
-        if dim == 8
-        else get_d4_codebook(indices.device, torch.float32)[1:]
-    )
-    restored = cb[indices.long()] * radii.to(torch.float32).unsqueeze(-1)
-    return restored.reshape(-1)[:total_elems].reshape(orig_shape).to(dtype)
-
 
 @torch.no_grad()
 def pack_spherical_code(
@@ -175,13 +102,47 @@ def pack_spherical_code(
     return best_idx.contiguous(), radii_store.contiguous(), orig_shape, max_chord_sq
 
 
+@torch.no_grad()
+def unpack_spherical_code(
+    indices: torch.Tensor,
+    radii: torch.Tensor,
+    orig_shape: Tuple[int, ...],
+    lattice: str = "e8",
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Распаковывает упакованные сферические индексы `uint8` и радиусы `float16` обратно в тензор."""
+    dim = 8 if lattice.lower() == "e8" else 4
+    total_elems = 1
+    for d in orig_shape:
+        total_elems *= d
+
+    cb = (
+        get_e8_codebook(indices.device, torch.float32)[1:]
+        if dim == 8
+        else get_d4_codebook(indices.device, torch.float32)[1:]
+    )
+    restored = cb[indices.long()] * radii.to(torch.float32).unsqueeze(-1)
+    return restored.reshape(-1)[:total_elems].reshape(orig_shape).to(dtype)
+
+
+@torch.no_grad()
+def quantize_spherical_code(
+    vectors: torch.Tensor,
+    lattice: str = "e8",
+    hyperbolic_poincare: bool = True,
+) -> Tuple[torch.Tensor, float]:
+    """Симуляция сжатия-восстановления сферическим/гиперболическим кодом."""
+    idx, radii, shape, max_chord = pack_spherical_code(
+        vectors, lattice=lattice, hyperbolic_poincare=hyperbolic_poincare
+    )
+    out = unpack_spherical_code(idx, radii, shape, lattice=lattice, dtype=vectors.dtype)
+    return out, max_chord
 
 # =========================================================================
 # 3. ПОБИТОВО-ТОЧНЫЕ ЦЕЛОЧИСЛЕННЫЕ ПРИМИТИВЫ (INTEGER-ONLY Q.F НА INT64)
 # =========================================================================
 
 def integer_only_softmax(logits: torch.Tensor, k_squarings: int = 5, frac_bits: int = 20) -> torch.Tensor:
-
     """
     Побитово-точная реализация `fixedPointExpZ` (MarkovL1CrossLayerAndIntegerTransformer.lean)
     в целочисленных регистрах `torch.int64` со сдвигами `>> frac_bits` (без float exp).
@@ -270,7 +231,6 @@ def integer_only_cayley_rope(
     while c_fixed.ndim < q.ndim:
         c_fixed = c_fixed.unsqueeze(0)
         s_fixed = s_fixed.unsqueeze(0)
-
 
     def _rot(vec: torch.Tensor) -> torch.Tensor:
         vf = torch.round(vec.to(torch.float32) * scale).to(torch.int64)
