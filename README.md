@@ -254,13 +254,14 @@ vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_vcore --max-re
   ```
 * **Interactive Wave-Interference Web UI (browser chat on PC or mobile):**
   ```bash
-  vcore-web --model ./qwen15_vcore --port 8080
+  vcore-web --model ./qwen15_vcore --port 7860
   ```
 # Zero-Dependency Native C++17 / AVX2 Binary in bit-exact Integer-Only Q14 mode
 ```
 ./build/vcore-run --model ./qwen15_vcore --prompt "Explain L1 median quantization." --tokens 64 --integer-only
 ```
 * **Tomography-Guided Compression & Surgical Unlearning (`--tomography`, `/scan`, `/unlearn`):**
+* 
 ```bash
 # Auto-assign per-layer precision modes using 4-channel Weight EM-Tomography
 vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_tomo --tomography --bundle ./qwen15_tomo.vcore
@@ -268,6 +269,18 @@ vcore-pack --hf-repo Qwen/Qwen2.5-1.5B-Instruct --output ./qwen15_tomo --tomogra
 # Inside vcore-ui interactive chat:
 #   /scan                  -> Inspect per-layer & per-head EM-Tomography map
 #   /unlearn <concept>     -> Surgically ablate targeted knowledge via Null-Space projection
+```
+- **Functional Brain EM-Tomography Studio (`vcore-web` & `vcore-ui`):**
+  - **Real-Time Layer-by-Layer Neurogenesis (SSE):** During model compression (`vcore-web` or `/pack` in `vcore-ui`), each quantized layer (`E8`, `1.58-bit`, `INT4`, `FP16`) grows its own topologically unique node and axonal tract in real time inside a 4-lobe brain projection (*Sensory/Temporal*, *Attention/Parietal*, *Logic MLP/Frontal*, *Output/Broca*).
+  - **Live fMRI Signal Propagation:** During prompt prefill and token streaming, lightweight forward hooks capture per-layer $\ell_1$ activation spikes—visualizing the input pulse entering the sensory cortex, propagating through attention/MLP pathways, and firing response impulses out of Broca's area synchronously with each generated token.
+  - **Dual View & Surgical Ablation (`/unlearn`):** Switch between **Macro Brain Projection (fMRI)** and **Micro Dendritic Synapse View** in `vcore-web` (port `7860`), inspect per-layer impedance/aspect ratios on hover, or trigger rank-1 null-space concept ablation directly from the UI.
+
+```bash
+# Launch the Functional Brain EM-Tomography Web Studio (default port 7860)
+vcore-web --model ./qwen15_vcore --port 7860
+
+# Launch the Interactive Terminal Studio with ASCII/ANSI Brain Map & live peak-node telemetry
+vcore-ui --model ./qwen15_vcore
 ```
 
 ### 7. One-Click Download, Hardware Auto-Pack & Chat (`vcore-pull`)
@@ -296,6 +309,8 @@ vcore-train --model Qwen/Qwen2.5-1.5B --data ./train.jsonl --output ./qwen_qat -
 ```
 vcore-bench --hidden-size 4096 --out-size 4096 --steps 30 --ab-compare
 ```
+
+
 ## Citation
 
 If you use **V-CORE (ℓ₁)-Certified** or the **Lean 4 ℓ₁-Projection Complexity** formal verification library in your research or software, please cite:
