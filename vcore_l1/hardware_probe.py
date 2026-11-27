@@ -141,7 +141,7 @@ def probe_hardware(preferred_device: Optional[str] = None) -> HardwareProfile:
     rec_budget = round(max(1.2, avail_mem * 0.82), 2)
     # Если памяти <= 8 ГБ, включаем сжатие эмбеддингов E8 и сферический KV-кэш
     low_mem = avail_mem <= 8.0
-    rec_sph_emb = low_mem
+    rec_sph_emb = False
     rec_kv = "spherical" if low_mem else "int4"
     # На мобильных / слабых CPU без дискретной GPU рекомендуем Integer-Only Q14 режим
     rec_int_only = (rec_dev == "cpu" and simd_backend in ("ARM-NEON", "SCALAR"))
