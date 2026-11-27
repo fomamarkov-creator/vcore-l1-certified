@@ -10,11 +10,11 @@ from transformers import AutoTokenizer, TextIteratorStreamer
 from .backend_dispatcher import get_dispatcher
 from .calibration import collect_activation_importance
 from .gguf_exporter import export_vcore_to_gguf
-from .inference_layer import VCoreDynamicCache, VCoreModelForCausalLM
+from .inference_layer import VCoreDynamicCache, VCoreLinear, VCoreModelForCausalLM
 from .safetensors_quantizer import (
+    repack_hf_hub_model,
     repack_safetensors_layerwise,
     repack_sharded_model,
-    repack_hf_hub_model,
 )
 from .vcore_bundle import unpack_vcore_bundle_to_temp
 
@@ -50,12 +50,12 @@ class VCoreTerminalStudio:
         print(
             "\nДоступные команды V-CORE Studio:\n"
             "  /pack <hf_repo_или_путь> <выходная_папка> [--vram ГБ] [--calib N] [--spherical-emb] [--gguf файл.gguf]\n"
-            "                        — Сжать модель (авто-бюджет железа + Cross-Layer компенсация)\n"
+            "                        — Сжать модель (авто-бюджет железа + ЭМРТ нейро-томограмма)\n"
             "  /load <путь_к_папке_или_.vcore> [--integer-only]\n"
             "                        — Загрузить сжатую модель или единый бандл .vcore с паспортом Lean 4\n"
             "  /hw                   — Показать профиль железа и активный C-ABI бэкенд\n"
             "  /unlearn <фраза>      — Точечно вырезать знание/тему из весов модели (ЭМРТ + Null-Space)\n"
-            "  /scan                 — ЭМРТ-томограмма весов загруженной модели (резонанс слоёв)\n"
+            "  /scan                 — ЭМРТ-томограмма весов загруженной модели (резонанс слоёв + карта мозга)\n"
             "  /clear                — Очистить историю диалога\n"
             "  /settings             — Показать текущие параметры генерации\n"
             "  /tokens <N>           — Установить лимит новых токенов\n"
@@ -66,6 +66,58 @@ class VCoreTerminalStudio:
             "  /exit                 — Выйти из программы\n"
         )
 
+    def render_brain_map(self, nodes_info: list, active_zones: set = None, title: str = "ЭМРТ-ТОМОГРАММА МОЗГА"):
+        CYAN, MAGENTA, GOLD, GREEN, DIM, RESET = "\033[96m", "\033[95m", "\033[93m", "\033[92m", "\033[90m", "\033[0m"
+        active_zones = active_zones or set()
+
+        template = [
+            "         .---======---.         ",
+            "       /  A    A    A   \\       ",
+            "      / A   A    M    M  \\      ",
+            "     |  S  A   M   M   M  |     ",
+            "     | S  S   M   M   M   |     ",
+            "      \\  S   M   M   B   /      ",
+            "       \\   '---'   B   /        ",
+            "         '-----------'          ",
+        ]
+
+        zone_counts = {"S": 0, "A": 0, "M": 0, "B": 0}
+        for item in nodes_info:
+            n = str(item.get("name", "")).lower()
+            if "embed" in n or "layers.0." in n:
+                zone_counts["S"] += 1
+            elif "lm_head" in n or "norm" in n:
+                zone_counts["B"] += 1
+            elif "attn" in n or ("proj" in n and any(k in n for k in ("q_", "k_", "v_", "o_"))):
+                zone_counts["A"] += 1
+            else:
+                zone_counts["M"] += 1
+
+        print(f"\n{CYAN}=== {title} (Узлов: {len(nodes_info)}) ==={RESET}")
+        for row in template:
+            out = []
+            for ch in row:
+                if ch in zone_counts:
+                    has_nodes = zone_counts[ch] > 0
+                    is_hot = ch in active_zones
+                    sym = "◉" if (is_hot or has_nodes) else "·"
+                    if ch == "S":
+                        out.append(f"{CYAN}{sym}{RESET}")
+                    elif ch == "A":
+                        out.append(f"{MAGENTA}{sym}{RESET}")
+                    elif ch == "M":
+                        out.append(f"{GOLD}{sym}{RESET}")
+                    elif ch == "B":
+                        out.append(f"{GREEN}{sym}{RESET}")
+                else:
+                    out.append(f"{DIM}{ch}{RESET}")
+            print("  " + "".join(out))
+        print(
+            f"  {CYAN}◉ Ввод (S:{zone_counts['S']}){RESET} | "
+            f"{MAGENTA}◉ Внимание (A:{zone_counts['A']}){RESET} | "
+            f"{GOLD}◉ Логика MLP (M:{zone_counts['M']}){RESET} | "
+            f"{GREEN}◉ Выход Брока (B:{zone_counts['B']}){RESET}\n"
+    )
     def load_model(self, model_dir: str, integer_only: bool = None):
         if integer_only is not None:
             self.integer_only = integer_only
@@ -90,6 +142,7 @@ class VCoreTerminalStudio:
             drift = self.certificate_info.get("certified_max_block_drift", "N/A")
             print(f"[Lean 4 Passport] {self.certificate_info.get('certificate_standard')} | Max Block Drift <= {drift}")
         print(f"[V-CORE] Модель готова за {time.time() - t0:.2f} сек!\n")
+
     def cmd_pack(self, args_list):
         if len(args_list) < 2:
             print("Использование: /pack <hf_repo_или_путь> <выходная_папка> [--vram 4.0] [--calib 16] [--spherical-emb] [--gguf out.gguf]")
@@ -125,27 +178,44 @@ class VCoreTerminalStudio:
             print(f"[V-CORE] Калибровка активаций и фактора Холецкого ({calib_samples} примеров)...")
             act_map, chol_map = collect_activation_importance(src, num_samples=calib_samples, collect_covariance=True)
 
+        packed_nodes = []
+
+        def on_tui_layer(evt):
+            packed_nodes.append(evt)
+            pct = int(evt.get("progress", 0) * 100)
+            print(
+                f"\r[ЭМРТ-Нейрогенез {pct:>3}%] Слой #{len(packed_nodes)}: {evt['name']:<40} [{evt['mode']}]",
+                end="",
+                flush=True,
+            )
+
         if os.path.isfile(src):
             stats = repack_safetensors_layerwise(
-                src, dst, target_vram_gb=target_vram, activation_map=act_map, chol_map=chol_map, spherical_emb=spherical_emb
+                src, dst, target_vram_gb=target_vram, activation_map=act_map, chol_map=chol_map,
+                spherical_emb=spherical_emb, use_tomography=True, progress_callback=on_tui_layer
             )
         elif os.path.isdir(src):
             stats = repack_sharded_model(
-                src, dst, target_vram_gb=target_vram, activation_map=act_map, chol_map=chol_map, spherical_emb=spherical_emb
+                src, dst, target_vram_gb=target_vram, activation_map=act_map, chol_map=chol_map,
+                spherical_emb=spherical_emb, use_tomography=True, progress_callback=on_tui_layer
             )
         else:
             stats = repack_hf_hub_model(
-                src, dst, target_vram_gb=target_vram, activation_map=act_map, chol_map=chol_map, spherical_emb=spherical_emb
+                src, dst, target_vram_gb=target_vram, activation_map=act_map, chol_map=chol_map,
+                spherical_emb=spherical_emb, use_tomography=True, progress_callback=on_tui_layer
             )
 
-        print("\n=== ОТЧЁТ О СЖАТИИ V-CORE ===")
+        print()
+        self.render_brain_map(packed_nodes, active_zones={"S", "A", "M", "B"}, title="КАРТА МОЗГА ПОСЛЕ СЖАТИЯ")
+
+        print("=== ОТЧЁТ О СЖАТИИ V-CORE ===")
         for k, v in stats.items():
             print(f"  {k:<25}: {v:.3f}" if isinstance(v, float) else f"  {k:<25}: {v}")
 
         if gguf_out and os.path.isdir(dst):
             g_stats = export_vcore_to_gguf(dst, gguf_out)
             print(f"=== GGUF ЭКСПОРТ ({gguf_out}) === {g_stats}")
-            
+
     def cmd_scan(self):
         if self.model is None:
             print("[!] Сначала загрузите модель командой /load <папка_модели_или_.vcore>\n")
@@ -160,8 +230,10 @@ class VCoreTerminalStudio:
             )
         if len(tomo) > 15:
             print(f"  ... и ещё {len(tomo) - 15} слоёв.")
-        print()
-        
+
+        nodes_list = [{"name": k, "mode": v["recommended_mode"]} for k, v in tomo.items()]
+        self.render_brain_map(nodes_list, active_zones={"S", "A", "M", "B"}, title="ЭМРТ-СКАН ЗАГРУЖЕННОЙ МОДЕЛИ")
+
     def cmd_unlearn(self, concept_text: str):
         if self.model is None or self.tokenizer is None:
             print("[!] Сначала загрузите модель командой /load <папка_модели_или_.vcore>\n")
@@ -176,9 +248,7 @@ class VCoreTerminalStudio:
         print(
             f"[V-CORE ЭМРТ] Вырезано из {res['edited_layers']} слоёв "
             f"(удалено L1-энергии: {res['total_l1_energy_ablated']}). История чата сброшена.\n"
-        )
-
-          
+    )
     def chat_turn(self, user_text: str):
         if self.model is None or self.tokenizer is None:
             print("[!] Сначала загрузите модель командой /load <папка_модели_или_.vcore>\n")
@@ -193,6 +263,21 @@ class VCoreTerminalStudio:
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         kv_cache = VCoreDynamicCache(group_size=32, mode=self.kv_mode)
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
+
+        live_energies = {}
+        hooks = []
+
+        def _make_hook(l_name):
+            def _hook(_mod, _inp, out):
+                if isinstance(out, torch.Tensor):
+                    live_energies[l_name] = float(out.detach().abs().mean().item())
+            return _hook
+
+        for m_name, mod in self.model.named_modules():
+            if isinstance(mod, (torch.nn.Linear, VCoreLinear)) and (
+                m_name.endswith("down_proj") or m_name.endswith("o_proj")
+            ):
+                hooks.append(mod.register_forward_hook(_make_hook(m_name)))
 
         gen_kwargs = dict(
             **inputs,
@@ -210,16 +295,25 @@ class VCoreTerminalStudio:
         print("\nAssistant > ", end="", flush=True)
         full_reply = []
         token_count = 0
-        for piece in streamer:
-            print(piece, end="", flush=True)
-            full_reply.append(piece)
-            token_count += 1
-        thread.join()
+        try:
+            for piece in streamer:
+                print(piece, end="", flush=True)
+                full_reply.append(piece)
+                token_count += 1
+        finally:
+            thread.join()
+            for h in hooks:
+                h.remove()
 
         elapsed = max(time.time() - t0, 1e-5)
         reply_text = "".join(full_reply)
         self.history.append({"role": "assistant", "content": reply_text})
-        print(f"\n\n[Скорость: {token_count / elapsed:.1f} ток/с | KV-кэш: {self.kv_mode} | Integer-Only: {self.integer_only}]\n")
+
+        hot_layer = max(live_energies.items(), key=lambda x: x[1])[0] if live_energies else "N/A"
+        print(
+            f"\n\n[Скорость: {token_count / elapsed:.1f} ток/с | KV-кэш: {self.kv_mode} | "
+            f"Пиковый узел ЭМРТ: {hot_layer}]\n"
+        )
 
     def run(self):
         print(BANNER)
@@ -248,7 +342,7 @@ class VCoreTerminalStudio:
                 elif cmd == "/scan":
                     self.cmd_scan()
                 elif cmd == "/unlearn":
-                    self.cmd_unlearn(user_in[len("/unlearn"):].strip())    
+                    self.cmd_unlearn(raw[len("/unlearn"):].strip())
                 elif cmd == "/clear":
                     self.history = []
                     print("[V-CORE] История диалога очищена.")
@@ -291,4 +385,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
+                                                                               
