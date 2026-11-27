@@ -4,7 +4,7 @@
 import math
 import os
 from decimal import Decimal, getcontext
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
@@ -106,10 +106,8 @@ class MarkovMatrixAnalyzer:
                 if potential_factor > 1 and target_n % potential_factor == 0:
                     return potential_factor
         return None
-
-
-# =========================================================================
-# 2. ВЕКТОРНЫЙ РЕЗОНАНСНЫЙ ПОДБОР МАСШТАБА ДЛЯ ТЕНЗОРОВ PYTORCH (GPU / CPU)
+    # =========================================================================
+# 2. ВЕКТОРНЫЙ РЕЗОНАНСНЫЙ ПОДБОР МАСШТАБА И МНОГОКАНАЛЬНЫЙ ЭМРТ-ТОМОГРАФ ВЕСОВ
 # =========================================================================
 
 @torch.no_grad()
@@ -149,12 +147,95 @@ def find_optimal_resonant_scale(
     abs_b = torch.abs(blocks)
     max_b = torch.clamp(torch.max(abs_b, dim=1, keepdim=True).values, min=1e-6)
     ratios = torch.linspace(0.15, 1.0, steps=num_candidates, device=blocks.device, dtype=blocks.dtype)
-    cands = max_b * ratios.unsqueeze(0)  # (B, K)
+    cands = max_b * ratios.unsqueeze(0)
 
-    imp_matrix = compute_tensor_resonance_impedance(blocks, cands)  # (B, K)
+    imp_matrix = compute_tensor_resonance_impedance(blocks, cands)
     best_imp, best_idx = torch.min(imp_matrix, dim=1)
     best_scale = torch.gather(cands, 1, best_idx.unsqueeze(1)).squeeze(1)
     return best_scale, best_imp
+
+
+@torch.no_grad()
+def scan_model_tomography(
+    model_or_state_dict: Dict[str, torch.Tensor] | torch.nn.Module,
+    num_candidates: int = 16,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Многоканальный резонансный томограф весов модели (Weight EM-Tomography):
+    сканирует каждый 2D-слой по 4 каналам диагностики:
+      1. Продольный срез по входным каналам (Z_in и пиковые выбросы);
+      2. Поперечный срез по выходным нейронам (Z_out и когерентность строк);
+      3. Резонансный импеданс блоков весов;
+      4. Спектральный выигрыш от вращения Уолша–Адамара W8.
+    Возвращает томографическую карту каждого слоя и рекомендуемый режим сжатия.
+    """
+    from .super_quantizer import fwht_8
+
+    if isinstance(model_or_state_dict, torch.nn.Module):
+        sd = {
+            f"{n}.weight": m.weight.detach()
+            for n, m in model_or_state_dict.named_modules()
+            if isinstance(m, torch.nn.Linear)
+        }
+    else:
+        sd = model_or_state_dict
+
+    tomogram: Dict[str, Dict[str, Any]] = {}
+    for name, tensor in sd.items():
+        if not isinstance(tensor, torch.Tensor) or not tensor.is_floating_point() or tensor.ndim != 2:
+            continue
+        if tensor.numel() < 256:
+            continue
+
+        w = tensor.to(torch.float32)
+        abs_w = torch.abs(w)
+
+        # Канал 1: Продольный срез (входные каналы / столбцы)
+        col_l1 = torch.mean(abs_w, dim=0)
+        col_max = torch.max(abs_w, dim=0).values
+        in_peak_ratio = float((torch.max(col_max) / torch.clamp(torch.median(col_l1), min=1e-6)).item())
+
+        # Канал 2: Поперечный срез (выходные нейроны / строки)
+        row_l1 = torch.mean(abs_w, dim=1)
+        row_max = torch.max(abs_w, dim=1).values
+        out_peak_ratio = float((torch.max(row_max) / torch.clamp(torch.median(row_l1), min=1e-6)).item())
+
+        # Канал 3: Резонансный импеданс 32-элементных блоков
+        pad = (32 - (w.numel() % 32)) % 32
+        flat = torch.cat([w.reshape(-1), torch.zeros(pad, device=w.device)]) if pad > 0 else w.reshape(-1)
+        blocks = flat.view(-1, 32)
+        _, min_imp = find_optimal_resonant_scale(blocks, num_candidates=num_candidates)
+        mean_impedance = float(torch.mean(min_imp).item())
+
+        # Канал 4: Спектральный срез W8 (выравнивание выбросов после Адамара)
+        pad8 = (8 - (w.numel() % 8)) % 8
+        flat8 = torch.cat([w.reshape(-1), torch.zeros(pad8, device=w.device)]) if pad8 > 0 else w.reshape(-1)
+        w_rot = fwht_8(flat8.view(-1, 8)) / 2.8284271247461903
+        rot_peak_ratio = float(
+            (torch.max(torch.abs(w_rot)) / torch.clamp(torch.median(torch.abs(w_rot)), min=1e-6)).item()
+        )
+        hadamard_gain = in_peak_ratio / max(rot_peak_ratio, 1e-6)
+
+        # Вердикт томографа по оптимальному режиму сжатия слоя
+        if "embed_tokens" in name or "lm_head" in name:
+            rec_mode = "FP16_PROTECTED"
+        elif in_peak_ratio > 45.0 or out_peak_ratio > 45.0 or mean_impedance > 190.0:
+            rec_mode = "INT4_HIGH_PRECISION"
+        elif hadamard_gain > 1.35 and mean_impedance < 145.0:
+            rec_mode = "E8_LATTICE_SUB1BIT"
+        else:
+            rec_mode = "TERNARY_158BIT"
+
+        tomogram[name] = {
+            "shape": tuple(w.shape),
+            "in_peak_ratio": round(in_peak_ratio, 2),
+            "out_peak_ratio": round(out_peak_ratio, 2),
+            "mean_impedance": round(mean_impedance, 2),
+            "hadamard_gain": round(hadamard_gain, 2),
+            "recommended_mode": rec_mode,
+        }
+
+    return tomogram
 
 
 # =========================================================================
@@ -215,4 +296,4 @@ def generate_resonance_plot(
     plt.savefig(save_path, facecolor="#0e1117", dpi=150, bbox_inches="tight")
     plt.close()
     return save_path
-  
+    
