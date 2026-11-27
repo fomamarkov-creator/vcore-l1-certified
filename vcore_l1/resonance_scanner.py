@@ -279,7 +279,7 @@ def surgical_unlearn_concept(
       3. Вычитает проекцию W_clean = W - strength * (W u) u^T с переупаковкой квантованных слоёв.
     """
     from .inference_layer import VCoreLinear
-    from .quantizer import pack_ternary_to_uint8, quantize_ternary_exact_blockwise
+    from .safetensors_quantizer import pack_ternary_to_uint8, quantize_ternary_exact_critical, unpack_uint8_to_int4, unpack_uint8_to_ternary
 
     if not neutral_prompts:
         neutral_prompts = [
@@ -368,9 +368,11 @@ def surgical_unlearn_concept(
             total_energy_removed += float(torch.sum(torch.abs(delta_w)).item())
 
             if mod.bits == 2:
-                q_grid, new_scales = quantize_ternary_exact_blockwise(w_clean.reshape(-1), mod.group_size)
-                mod.vcore_packed.copy_(pack_ternary_to_uint8(q_grid).to(mod.vcore_packed.device))
+                _, q_mask, new_scales = quantize_ternary_exact_critical(w_clean.reshape(-1, mod.group_size))
+                packed_u8, _ = pack_ternary_to_uint8(q_mask)
+                mod.vcore_packed.copy_(packed_u8.to(mod.vcore_packed.device))
                 mod.vcore_scales.copy_(new_scales.to(mod.vcore_scales.dtype))
+
             mod._w_cache = w_clean.to(mod.vcore_scales.dtype)
             edited_layers += 1
 
