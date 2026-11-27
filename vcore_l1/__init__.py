@@ -114,8 +114,10 @@ from .resonance_scanner import (
     MarkovMatrixAnalyzer,
     compute_tensor_resonance_impedance,
     find_optimal_resonant_scale,
+    scan_model_tomography,
     generate_resonance_plot,
 )
+
 
 __version__ = "8.0.0"
 __all__ = [
