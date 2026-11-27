@@ -425,7 +425,7 @@ def repack_safetensors_layerwise(
 
         w_f32 = tensor.to(device=work_device, dtype=torch.float32)
 
-        if cross_layer:
+            if cross_layer_comp:
             src_name = None
             if name.endswith(".self_attn.o_proj.weight"):
                 src_name = name.replace(".self_attn.o_proj.weight", ".self_attn.v_proj.weight")
@@ -456,7 +456,7 @@ def repack_safetensors_layerwise(
             chol_r=chol_r,
         )
 
-        if cross_layer and (name.endswith(".self_attn.v_proj.weight") or name.endswith(".mlp.up_proj.weight")):
+        if cross_layer_comp and (name.endswith(".self_attn.v_proj.weight") or name.endswith(".mlp.up_proj.weight")):
             quant_cache[name] = w_hat.cpu()
 
         total_l1_orig += l1_orig
