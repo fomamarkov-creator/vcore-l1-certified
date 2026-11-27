@@ -158,6 +158,39 @@ class VCoreTerminalStudio:
 
         load_target = model_dir
         self.certificate_info = None
+                if os.path.isfile(model_dir) and model_dir.endswith(".gguf"):
+            print(f"[V-CORE] Обнаружен GGUF-файл {model_dir} -> загрузка в режиме ЭМРТ-инспекции...")
+            try:
+                from gguf import GGUFReader
+            except ImportError:
+                print("[!] Для чтения GGUF установите пакет: pip install gguf\n")
+                return
+            t0 = time.time()
+            reader = GGUFReader(model_dir)
+            gguf_shell = torch.nn.Module()
+            for t in reader.tensors:
+                if len(t.shape) == 2:
+                    in_f, out_f = int(t.shape), int(t.shape)
+                    lin = torch.nn.Linear(in_f, out_f, bias=False)
+                    arr = torch.tensor(t.data, dtype=torch.float32)
+                    if arr.numel() == lin.weight.numel():
+                        lin.weight.data.copy_(arr.view_as(lin.weight))
+                    setattr(gguf_shell, t.name.replace(".", "_"), lin)
+            self.model = gguf_shell
+            self.tokenizer = None
+            self.model_path = model_dir
+            self.history = []
+            self.context_tokens_est = 0
+            self.last_thought_trace = []
+            self.domain_map = {
+                f"{name}.weight": {"domain": "general", "scores": {}}
+                for name, _ in gguf_shell.named_children()
+            }
+            print(
+                f"[V-CORE] GGUF загружен для ЭМРТ за {time.time() - t0:.2f} сек "
+                f"({len(self.domain_map)} слоёв). Доступны /scan, /xray, /export-brain.\n"
+            )
+            return
         if os.path.isfile(model_dir) and model_dir.endswith(".vcore"):
             print(f"[V-CORE] Распаковка единого бандла {model_dir}...")
             self._tmp_bundle, self.certificate_info = unpack_vcore_bundle_to_temp(model_dir)
