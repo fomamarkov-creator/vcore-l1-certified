@@ -338,7 +338,9 @@ def repack_safetensors_layerwise(
     cross_layer: bool = True,
     spherical_emb: bool = False,
     use_tomography: bool = False,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
+
     """
     Послойная потоковая упаковка одного файла `.safetensors` с поддержкой:
       - Межслойной компенсации кривизны (`v_proj -> o_proj`, `up_proj -> down_proj`);
