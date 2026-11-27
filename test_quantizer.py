@@ -54,6 +54,9 @@ from vcore_l1 import (
     unpack_vcore_bundle_to_temp,
     repack_vlm_model,
     decompose_to_dyadic_vnodes,
+    MarkovMatrixAnalyzer,
+    get_markov_impedance,
+    find_optimal_resonant_scale,
 )
 
 
@@ -315,6 +318,14 @@ def main():
             qat_test.weight[0, 0] = 300.0
         reset_cnt = qat_test.apply_modular_plateau_reset()
         assert reset_cnt == 1 and float(torch.abs(qat_test.weight[0, 0]).item()) < 256.0
+
+# Проверка модуля резонансного сканера (resonance_scanner.py)
+        analyzer = MarkovMatrixAnalyzer()
+        assert analyzer.find_resonance(77) in (7, 11)
+        assert get_markov_impedance(77, 7) < 1e-12
+        opt_sc, opt_imp = find_optimal_resonant_scale(torch.randn(8, 32))
+        assert opt_sc.shape == (8,) and opt_imp.shape == (8,)
+        
     
     print(
         f"[OK] Все компоненты v5.0 (Lean 4 24-Module Core, Cross-Layer, Spherical E8, Integer-Only Q14/Q20, "
