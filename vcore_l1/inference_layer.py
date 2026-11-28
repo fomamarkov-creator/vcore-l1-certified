@@ -4,6 +4,7 @@
 import ctypes
 import glob
 import os
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
@@ -111,11 +112,9 @@ class VCoreKVCacheQuantizer:
         p_in = (MARKOV_LAMBDA_LIMIT - rho) / (rho + 1.0)
         p_ext = 1.0
         locked = p_in <= p_ext
-        # В заблокированной зоне подавляем только высокочастотный дрейф на величину Le₀ = 0.024
         damped = xf * (1.0 - MARKOV_LE0_GAP)
         stabilized = torch.where(locked, damped, xf)
         return stabilized.to(kv_tensor.dtype)
-
 
     @torch.no_grad()
     def compress_kv(self, kv_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...]]:
@@ -168,6 +167,8 @@ class VCoreKVCacheQuantizer:
             grid = unpack_uint8_to_int4(packed, (padded_len,)).to(packed.device)
         restored = (grid.reshape(-1, self.group_size) * scales.to(torch.float32).unsqueeze(1)).reshape(-1)
         return restored[:total_elems].reshape(orig_shape).to(dtype)
+
+
 class VCoreDynamicCache:
     """
     Совместимый с Hugging Face transformers (v4 и v5+) кэш генерации,
@@ -220,8 +221,6 @@ class VCoreDynamicCache:
         query_length = cache_position if isinstance(cache_position, int) else int(cache_position.shape)
         kv_length = self.get_seq_length(layer_idx) + query_length
         return kv_length, 0
-
-
 class VCoreSphericalEmbedding(nn.Module):
     """
     Сжатый слой nn.Embedding на гиперболических сферических кодах E₈:
@@ -300,6 +299,7 @@ class VCoreIntegerRMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return integer_only_rmsnorm(x, self.weight, eps=self.eps, newton_iters=4, frac_bits=14)
+
 
 class VCoreLinear(nn.Module):
     """
@@ -441,8 +441,6 @@ class VCoreLinear(nn.Module):
         bias_cast = self.bias.to(x.dtype) if self.bias is not None else None
         out = F.linear(x_2d, self._w_cache, bias_cast)
         return out.reshape(*orig_shape[:-1], self.out_features)
-
-
 def inject_vcore_layers(
     model: nn.Module,
     state_dict: Dict[str, torch.Tensor],
@@ -523,7 +521,7 @@ def inject_vcore_layers(
             setattr(parent, parts[-1], int_norm)
 
     non_packed = {k: v for k, v in state_dict.items() if ".vcore_" not in k}
-    model.load_state_dict(non_packed, strict=False)
+    model.load_state_dict(non_packed, strict=False, assign=True)
     if hasattr(model, "tie_weights") and not any(
         isinstance(m, (VCoreSphericalEmbedding, VCoreSphericalLinear)) for m in model.modules()
     ):
@@ -539,8 +537,21 @@ def load_vcore_causal_lm(
 ):
     from transformers import AutoConfig, AutoModelForCausalLM
 
+    temp_dir = None
+    if os.path.isfile(model_dir) and str(model_dir).endswith(".vcore"):
+        from .vcore_bundle import unpack_vcore_bundle_to_temp
+        temp_dir, *_ = unpack_vcore_bundle_to_temp(model_dir)
+        model_dir = temp_dir.name
+
+    try:
+        from accelerate import init_empty_weights
+        ctx = init_empty_weights()
+    except ImportError:
+        ctx = nullcontext()
+
     config = AutoConfig.from_pretrained(model_dir)
-    model = AutoModelForCausalLM.from_config(config, dtype=dtype)
+    with ctx:
+        model = AutoModelForCausalLM.from_config(config, dtype=dtype)
 
     shard_files = sorted(glob.glob(os.path.join(model_dir, "*.safetensors")))
     if not shard_files:
@@ -551,7 +562,19 @@ def load_vcore_causal_lm(
         merged_sd.update(load_file(sf))
 
     model = inject_vcore_layers(model, merged_sd, integer_only=integer_only)
-    return model.to(device=device, dtype=dtype).eval()
+    if any(p.is_meta for p in model.parameters()):
+        model = model.to_empty(device=device)
+        for mod in model.modules():
+            if hasattr(mod, "rotary_emb") and hasattr(mod.rotary_emb, "inv_freq"):
+                if mod.rotary_emb.inv_freq.is_meta:
+                    mod.rotary_emb.__init__(config=config, device=device)
+    else:
+        model = model.to(device=device)
+
+    model = model.to(dtype=dtype).eval()
+    if temp_dir is not None:
+        model._vcore_temp_dir = temp_dir
+    return model
 
 
 class VCoreModelForCausalLM:
